@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-multipart
+pillow
+google-cloud-vision
+opencv-python-headless

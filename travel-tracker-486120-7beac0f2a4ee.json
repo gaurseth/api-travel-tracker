@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "travel-tracker-486120",
+  "private_key_id": "7beac0f2a4ee4963781eaebaaa445436cb92ef1d",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCaVuWevp1nkSbB\ny9XNAi0t0N/9IAUhMQQ2TBn8VNHiDZNzER5U+td6xB0bNtoyEM8B+2X4vrFXEKlj\nRWLAdX5tT1n77dQTjFtmt75B/YOvxsJQ3DKiNQVn+SX2ZWqio2vLu30Nqv7ltSiL\nYEza6OF0yA+B9Y5Klw0iEjYEvczYpZpoTUrz0pJzv/LaAKpTEbl8lssoieMtRZdJ\nGruSzZc4eBaJjRVohz4MlswDtD9ivPNHzzYJdU/eJ35oRrRgKPL0tSce3Lz/P+jU\n2DtXrheAqqJ5UOWqK7vaGvQc/0uEd5Gk8okxqEcdVoleF3JCzVmyFOSHOvTzwDoT\nqJQmDxbxAgMBAAECggEAAw3oxSbtTJswJB9tg5073udebr8AmacDop3yroj7WYDZ\nMUqjpKeiq56q20rPJQoVXgBh73BkUs5k+xk999movE8jfx4g/MKMiAMR9YfHyyrw\n1e1npfNh6sxLfVLwOhf9FlbyEHr481DjRKUtxtrF5HFgR4XVeyx+VsAQwtsCjT/W\nMXPd2V4rskgK2DL3d3DOD4ROLqm7FXz5oTinx8ejqhB4Gqzve/3ZR/r96LkAJp1S\nyzus7zatvnRhdwXhA8RlRMfGrk7/i6eIt60gIyHuFEv0ISqTEjAier0n9nslLXzt\nOm5sKkk7cVgU+z2VURP84usEgAZx4Wa4MP9vhXctCQKBgQDQpHTz5+zjKsef3oK+\n0yXnkZfzjc/whlnAvkKTfl89ws1G3+Jx51z+mqLryE4AntrqwsHr79knjj1YFzB9\n8lQgWdtcYJkqV2v/i+aSAcLnsBLt5K1eyRX/a/TAs3yVrT6RXIAsKPeK7akcfxUi\nYn6zS8RLMRlZysn3U6MU8LHXaQKBgQC9XxF7IT5nnn0/Cjv8PxFY+P7A6U+ZX9fB\napK+FrNMEj/WH4v++2/STvx9/7mInzlJiebwZN+hX4615n8wdDb3GlHVlSoQo6aJ\nu9pdoPHQn1BbabmP/UdP+cwFm7UPvVxwOFSBn8af1HsRqjynEnDBWEdBe8bgg3v8\nt8FtoLgaSQKBgHU3X6lD7Dc36ozrgoLYt1vg1QB09JTJthTuDxM0FSfqkE84Ks0Z\nUYqMr+lNUF1S4eSwZCg8SMDLTbV22bx4b0D5mp7MemBqWvdnzrLKoIhvyEK0jZ5J\n1Lz6FrhIXj7s5NDfqfalUWVQ3ghvcR0vPsVWVMJ1pCtpHYyBBYcXLqK5AoGAPPRn\n5RFLTAEo4WzC6CvIwrHLFn9C3uSJxzktqMAX0GmjYKHg5x853CEOhuQUbVSLFQ+t\nZT2i+gePIR/jWs5djuZK5wvPcXGrvnPYEwEmNPfC3tnGIAHvvV9ze26mNj3Gjlyj\nXuH2BiZXwtTgFwsJfkKTFRHpbwUDmNHxEf+EovkCgYEAyBB/TTB8KtqxSqbkJzlo\n5ZOA2O5jK6FGvM2J8Zx96SzX+hDG51avrjXRLtFdfjtjz/cf+PbSMxxaGcK0CPvj\nHs58hI0V0sbCZ2LNm5xR7fRJkep52u4sGsg2/hfZU0nJwrUupWesi3FQA4YfZhhr\nSOs1PzdBeBJe095m7A9q92o=\n-----END PRIVATE KEY-----\n",
+  "client_email": "service-account-tt@travel-tracker-486120.iam.gserviceaccount.com",
+  "client_id": "104136113820820022247",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/service-account-tt%40travel-tracker-486120.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
