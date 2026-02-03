@@ -1,15 +1,4 @@
 from fastapi import FastAPI, File, UploadFile
-
-app = FastAPI()
-
-@app.post("/extract-boarding-pass")
-async def extract_boarding_pass(file: UploadFile = File(...)):
-    return {
-        "filename": file.filename,
-        "status": "received"
-    }
-
-from fastapi import FastAPI, File, UploadFile
 from ocr import extract_text
 from parser import parse_boarding_pass
 
