@@ -4,7 +4,7 @@ from parser import parse_boarding_pass
 
 app = FastAPI()
 
-@app.post("/")
+@app.get("/")
 async def root():
     return {"message": "Welcome to the Boarding Pass OCR API!"}
 
