@@ -8,7 +8,7 @@ app = FastAPI()
 async def root():
     return {"message": "Welcome to the Boarding Pass OCR API!"}
 
-@app.post("/extract-boarding-pass")
+@app.get("/extract-boarding-pass")
 async def extract_boarding_pass(file: UploadFile = File()):
     image_bytes = await file.read()
     raw_text = extract_text(image_bytes)
