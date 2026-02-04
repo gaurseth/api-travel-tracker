@@ -1,3 +1,4 @@
+# main.py
 from fastapi import FastAPI, File, UploadFile
 from ocr import extract_text
 from parser import parse_boarding_pass

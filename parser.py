@@ -1,4 +1,6 @@
+# parser.py
 import re
+from extractors.flight_number import extract_flight_number
 
 MONTHS = (
     "JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|"
@@ -23,13 +25,12 @@ def parse_boarding_pass(text: str):
         confidence["passengerName"] = 0.0
 
     # ---------- Flight Number ----------
-    flight_match = re.search(r"\b([A-Z]{2})\s?(\d{2,4})\b", text)
-    if flight_match:
-        data["airlineCode"] = flight_match.group(1)
-        data["flightNumber"] = flight_match.group(2)
-        confidence["flightNumber"] = 0.9
-    else:
-        confidence["flightNumber"] = 0.0
+    flight_info = extract_flight_number(text, ocr_conf=1.0)
+    data["airlineCode"] = flight_info["airlineCode"].value
+    confidence["airlineCode"] = flight_info["airlineCode"].confidence
+
+    data["flightNumber"] = flight_info["flightNumber"].value
+    confidence["flightNumber"] = flight_info["flightNumber"].confidence
 
     # ---------- Seat ----------
     seat_match = re.search(r"\b\d{1,2}[A-Z]\b", text)
