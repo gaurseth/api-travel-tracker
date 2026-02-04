@@ -1,6 +1,9 @@
 # parser.py
 import re
+from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo
+from models.common import ExtractedValue
 from extractors.flight_number import extract_flight_number
+from extractors.passenger_name import extract_passenger_name
 
 MONTHS = (
     "JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|"
@@ -12,25 +15,26 @@ def parse_boarding_pass(text: str):
     confidence = {}
 
     # ---------- Passenger Name ----------
-    name_match = re.search(
-        r"\b([A-Z]+)\/([A-Z]+)\s+(MR|MRS|MS|MISS|DR)\b",
-        text
+    passenger_info = extract_passenger_name(text, ocr_conf=1.0)
+    passenger_obj = PassengerInfo(
+        first_name=passenger_info["firstName"],
+        last_name=passenger_info["lastName"],
+        full_name=ExtractedValue(
+            value=f"{passenger_info['firstName'].value} {passenger_info['lastName'].value}" 
+                  if passenger_info["firstName"].value and passenger_info["lastName"].value else None,
+            confidence=min(passenger_info["firstName"].confidence, passenger_info["lastName"].confidence),
+            confidence_factors=None  # optional, can combine factors later
+        )
     )
-    if name_match:
-        data["lastName"] = name_match.group(1)
-        data["firstName"] = name_match.group(2)
-        data["title"] = name_match.group(3)
-        confidence["passengerName"] = 0.95
-    else:
-        confidence["passengerName"] = 0.0
 
     # ---------- Flight Number ----------
     flight_info = extract_flight_number(text, ocr_conf=1.0)
-    data["airlineCode"] = flight_info["airlineCode"].value
-    confidence["airlineCode"] = flight_info["airlineCode"].confidence
-
-    data["flightNumber"] = flight_info["flightNumber"].value
-    confidence["flightNumber"] = flight_info["flightNumber"].confidence
+    flight_obj = FlightInfo(
+        flight_number=flight_info["flightNumber"],
+        airline_code=flight_info["airlineCode"],
+        operating_carrier=None,  # can be added later
+        date=None  # placeholder, implement date extractor later
+    )
 
     # ---------- Seat ----------
     seat_match = re.search(r"\b\d{1,2}[A-Z]\b", text)
@@ -83,8 +87,23 @@ def parse_boarding_pass(text: str):
         sum(valid_scores) / len(valid_scores), 2
     ) if valid_scores else 0.0
 
-    return {
-        "data": data,
-        "confidence": confidence,
-        "overallConfidence": overall_confidence
-    }
+    ##return {
+    ##    "data": data,
+    ##    "confidence": confidence,
+    ##    "overallConfidence": overall_confidence
+    ##}
+
+    # ---------- Build BoardingPass object ----------
+    boarding_pass_obj = BoardingPass(
+        passenger=passenger_obj,
+        flight=flight_obj,
+        airline=None,         # placeholder
+        route=None,           # placeholder
+        boarding=None,        # placeholder
+        pnr=None,             # placeholder
+        sequence_number=None, # placeholder
+        barcode=None,         # placeholder
+        raw_ocr_text=text     # store the raw text
+    )
+
+    return boarding_pass_obj

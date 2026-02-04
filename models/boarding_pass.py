@@ -17,6 +17,7 @@ class PassengerInfo(BaseModel):
 
 class FlightInfo(BaseModel):
     flight_number: ExtractedValue
+    
     operating_carrier: Optional[ExtractedValue] = None
     date: ExtractedValue  # ISO-8601 yyyy-mm-dd
 
