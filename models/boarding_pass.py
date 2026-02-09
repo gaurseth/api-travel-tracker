@@ -17,9 +17,9 @@ class PassengerInfo(BaseModel):
 
 class FlightInfo(BaseModel):
     flight_number: ExtractedValue
-    
+    airline_code: ExtractedValue
     operating_carrier: Optional[ExtractedValue] = None
-    date: ExtractedValue  # ISO-8601 yyyy-mm-dd
+    date: Optional[ExtractedValue] = None  # ISO-8601 yyyy-mm-dd
 
 
 class LocationInfo(BaseModel):
@@ -46,11 +46,11 @@ class BarcodeInfo(BaseModel):
 
 
 class BoardingPass(BaseModel):
-    airline: AirlineInfo
+    airline: Optional[AirlineInfo] = None
     passenger: PassengerInfo
     flight: FlightInfo
-    route: RouteInfo
-    boarding: BoardingInfo
+    route: Optional[RouteInfo] = None
+    boarding: Optional[BoardingInfo] = None
     pnr: Optional[ExtractedValue] = None
     sequence_number: Optional[ExtractedValue] = None
     barcode: Optional[BarcodeInfo] = None

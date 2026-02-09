@@ -1,9 +1,10 @@
 # parser.py
 import re
-from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo
+from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo, BoardingInfo
 from models.common import ExtractedValue
 from extractors.flight_number import extract_flight_number
 from extractors.passenger_name import extract_passenger_name
+from extractors.seat import extract_seat
 
 MONTHS = (
     "JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|"
@@ -37,12 +38,11 @@ def parse_boarding_pass(text: str):
     )
 
     # ---------- Seat ----------
-    seat_match = re.search(r"\b\d{1,2}[A-Z]\b", text)
-    if seat_match:
-        data["seat"] = seat_match.group(0)
-        confidence["seat"] = 0.9
-    else:
-        confidence["seat"] = 0.0
+    seat_ev = extract_seat(text, ocr_conf=1.0)
+    
+    boarding_info = BoardingInfo(
+        seat=seat_ev
+        )
 
     # ---------- Route ----------
     route_match = re.search(r"\b([A-Z]{3})\s+TO\s+([A-Z]{3})\b", text)
@@ -87,11 +87,11 @@ def parse_boarding_pass(text: str):
         sum(valid_scores) / len(valid_scores), 2
     ) if valid_scores else 0.0
 
-    ##return {
-    ##    "data": data,
-    ##    "confidence": confidence,
-    ##    "overallConfidence": overall_confidence
-    ##}
+    #return {
+    #    "data": data,
+    #    "confidence": confidence,
+    #    "overallConfidence": overall_confidence
+    #}
 
     # ---------- Build BoardingPass object ----------
     boarding_pass_obj = BoardingPass(
@@ -99,7 +99,7 @@ def parse_boarding_pass(text: str):
         flight=flight_obj,
         airline=None,         # placeholder
         route=None,           # placeholder
-        boarding=None,        # placeholder
+        boarding=boarding_info,
         pnr=None,             # placeholder
         sequence_number=None, # placeholder
         barcode=None,         # placeholder

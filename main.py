@@ -1,5 +1,6 @@
 # main.py
 from fastapi import FastAPI, File, UploadFile
+import traceback
 from ocr import extract_text
 from parser import parse_boarding_pass
 
@@ -11,11 +12,16 @@ async def root():
 
 @app.post("/extract-boarding-pass")
 async def extract_boarding_pass(file: UploadFile = File()):
-    image_bytes = await file.read()
-    raw_text = extract_text(image_bytes)
-    parsed_data = parse_boarding_pass(raw_text)
+    try:
+        image_bytes = await file.read()
+        raw_text = extract_text(image_bytes)
+        parsed_data = parse_boarding_pass(raw_text)
 
-    return {
-        "parsed_data": parsed_data,
-        "raw_text": raw_text
-    }
+        return {
+            "parsed_data": parsed_data,
+            "raw_text": raw_text
+        }
+    
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
