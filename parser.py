@@ -1,109 +1,90 @@
 # parser.py
-import re
-from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo, BoardingInfo
+from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo, BoardingInfo, RouteInfo, LocationInfo
 from models.common import ExtractedValue
 from extractors.flight_number import extract_flight_number
 from extractors.passenger_name import extract_passenger_name
 from extractors.seat import extract_seat
-
-MONTHS = (
-    "JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|"
-    "JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER"
-)
+from extractors.route import extract_route
+from extractors.date import extract_date
+from extractors.boarding_time import extract_boarding_time
+from extractors.pnr import extract_pnr, extract_ticket_number
+from extractors.gate import extract_gate
 
 def parse_boarding_pass(text: str):
-    data = {}
-    confidence = {}
-
+    """
+    Parses boarding pass text and returns a structured BoardingPass object.
+    All fields use ExtractedValue with confidence scoring.
+    """
     # ---------- Passenger Name ----------
     passenger_info = extract_passenger_name(text, ocr_conf=1.0)
     passenger_obj = PassengerInfo(
         first_name=passenger_info["firstName"],
         last_name=passenger_info["lastName"],
         full_name=ExtractedValue(
-            value=f"{passenger_info['firstName'].value} {passenger_info['lastName'].value}" 
+            value=f"{passenger_info['firstName'].value} {passenger_info['lastName'].value}"
                   if passenger_info["firstName"].value and passenger_info["lastName"].value else None,
-            confidence=min(passenger_info["firstName"].confidence, passenger_info["lastName"].confidence),
-            confidence_factors=None  # optional, can combine factors later
+            confidence=min(passenger_info["firstName"].confidence, passenger_info["lastName"].confidence)
+                       if passenger_info["firstName"].value and passenger_info["lastName"].value else 0.0,
+            confidence_factors=None
         )
     )
 
-    # ---------- Flight Number ----------
+    # ---------- Flight Number & Airline ----------
     flight_info = extract_flight_number(text, ocr_conf=1.0)
+
+    # ---------- Date ----------
+    date_info = extract_date(text, ocr_conf=1.0)
+
     flight_obj = FlightInfo(
         flight_number=flight_info["flightNumber"],
         airline_code=flight_info["airlineCode"],
-        operating_carrier=None,  # can be added later
-        date=None  # placeholder, implement date extractor later
+        operating_carrier=None,  # can be enhanced later
+        date=date_info["date_string"]
     )
-
-    # ---------- Seat ----------
-    seat_ev = extract_seat(text, ocr_conf=1.0)
-    
-    boarding_info = BoardingInfo(
-        seat=seat_ev
-        )
 
     # ---------- Route ----------
-    route_match = re.search(r"\b([A-Z]{3})\s+TO\s+([A-Z]{3})\b", text)
-    if route_match:
-        data["from"] = route_match.group(1)
-        data["to"] = route_match.group(2)
-        confidence["route"] = 0.95
-    else:
-        confidence["route"] = 0.0
+    route_info = extract_route(text, ocr_conf=1.0)
 
-    # ---------- Date ----------
-    date_match = re.search(
-        rf"\b(\d{{1,2}})\s+({MONTHS})\b",
-        text
+    route_obj = None
+    if route_info["origin"].value and route_info["destination"].value:
+        route_obj = RouteInfo(
+            origin=LocationInfo(
+                iata=route_info["origin"],
+                city=None  # can be enriched with airport lookup later
+            ),
+            destination=LocationInfo(
+                iata=route_info["destination"],
+                city=None
+            )
+        )
+
+    # ---------- Boarding Info ----------
+    seat_result = extract_seat(text, ocr_conf=1.0)
+    boarding_time = extract_boarding_time(text, ocr_conf=1.0)
+    gate = extract_gate(text, ocr_conf=1.0)
+
+    boarding_obj = BoardingInfo(
+        time=boarding_time,
+        gate=gate,
+        seat=seat_result["seat"],
+        group=None  # can be added later
     )
-    if date_match:
-        data["day"] = date_match.group(1)
-        data["month"] = date_match.group(2).title()
-        confidence["date"] = 0.85
-    else:
-        confidence["date"] = 0.0
 
-    # ---------- Boarding Time ----------
-    time_match = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", text)
-    if time_match:
-        data["boardingTime"] = time_match.group(0)
-        confidence["boardingTime"] = 0.9
-    else:
-        confidence["boardingTime"] = 0.0
-
-    # ---------- Ticket Number ----------
-    ticket_match = re.search(r"\b(\d{3})\s?(\d{10})\b", text)
-    if ticket_match:
-        data["ticketNumber"] = f"{ticket_match.group(1)}{ticket_match.group(2)}"
-        confidence["ticketNumber"] = 0.95
-    else:
-        confidence["ticketNumber"] = 0.0
-
-    # ---------- Overall Confidence ----------
-    valid_scores = [v for v in confidence.values() if v > 0]
-    overall_confidence = round(
-        sum(valid_scores) / len(valid_scores), 2
-    ) if valid_scores else 0.0
-
-    #return {
-    #    "data": data,
-    #    "confidence": confidence,
-    #    "overallConfidence": overall_confidence
-    #}
+    # ---------- PNR & Ticket Number ----------
+    pnr = extract_pnr(text, ocr_conf=1.0)
+    ticket_number = extract_ticket_number(text, ocr_conf=1.0)
 
     # ---------- Build BoardingPass object ----------
     boarding_pass_obj = BoardingPass(
         passenger=passenger_obj,
         flight=flight_obj,
-        airline=None,         # placeholder
-        route=None,           # placeholder
-        boarding=boarding_info,
-        pnr=None,             # placeholder
-        sequence_number=None, # placeholder
-        barcode=None,         # placeholder
-        raw_ocr_text=text     # store the raw text
+        airline=None,  # can be enhanced with airline lookup
+        route=route_obj,
+        boarding=boarding_obj,
+        pnr=pnr if pnr.value else None,
+        sequence_number=ticket_number if ticket_number.value else None,  # using ticket_number as sequence
+        barcode=None,  # barcode detection can be added later
+        raw_ocr_text=text
     )
 
     return boarding_pass_obj
