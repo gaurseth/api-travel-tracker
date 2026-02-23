@@ -5,3 +5,7 @@ python-multipart
 pillow
 google-cloud-vision
 opencv-python-headless
+google-cloud-firestore
+pydantic
+firebase-admin
+python-dotenv

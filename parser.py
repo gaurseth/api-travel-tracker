@@ -1,6 +1,7 @@
 # parser.py
+from typing import Tuple, List
 from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo, BoardingInfo, RouteInfo, LocationInfo
-from models.common import ExtractedValue
+from models.common import ExtractedValue, Warning
 from extractors.flight_number import extract_flight_number
 from extractors.passenger_name import extract_passenger_name
 from extractors.seat import extract_seat
@@ -9,11 +10,15 @@ from extractors.date import extract_date
 from extractors.boarding_time import extract_boarding_time
 from extractors.pnr import extract_pnr, extract_ticket_number
 from extractors.gate import extract_gate
+from scoring.aggregation import compute_overall_confidence, get_extraction_quality_label
 
-def parse_boarding_pass(text: str):
+def parse_boarding_pass(text: str) -> Tuple[BoardingPass, float, List[Warning], str]:
     """
-    Parses boarding pass text and returns a structured BoardingPass object.
+    Parses boarding pass text and returns a structured BoardingPass object with confidence metrics.
     All fields use ExtractedValue with confidence scoring.
+
+    Returns:
+        Tuple of (boarding_pass, overall_confidence, warnings, quality_label)
     """
     # ---------- Passenger Name ----------
     passenger_info = extract_passenger_name(text, ocr_conf=1.0)
@@ -87,4 +92,8 @@ def parse_boarding_pass(text: str):
         raw_ocr_text=text
     )
 
-    return boarding_pass_obj
+    # ---------- Compute Overall Confidence ----------
+    overall_confidence, warnings = compute_overall_confidence(boarding_pass_obj)
+    quality_label = get_extraction_quality_label(overall_confidence)
+
+    return boarding_pass_obj, overall_confidence, warnings, quality_label
