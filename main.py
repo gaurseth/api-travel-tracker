@@ -186,8 +186,8 @@ async def extract_boarding_pass(
         image_bytes = await file.read()
         raw_text = extract_text(image_bytes)
 
-        # Parse boarding pass with confidence scoring
-        boarding_pass, overall_confidence, warnings, quality_label = parse_boarding_pass(raw_text)
+        # Parse boarding pass with confidence scoring (tries barcode first, then OCR)
+        boarding_pass, overall_confidence, warnings, quality_label = parse_boarding_pass(raw_text, image_bytes)
 
         response = {
             "boarding_pass": boarding_pass,
@@ -486,7 +486,7 @@ async def attach_boarding_pass(
         # Extract and parse boarding pass
         image_bytes = await file.read()
         raw_text = extract_text(image_bytes)
-        boarding_pass, overall_confidence, warnings, quality_label = parse_boarding_pass(raw_text)
+        boarding_pass, overall_confidence, warnings, quality_label = parse_boarding_pass(raw_text, image_bytes)
 
         # Attach to trip
         success = TripService.attach_boarding_pass_to_trip(

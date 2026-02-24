@@ -1,0 +1,262 @@
+"""
+IATA Bar Coded Boarding Pass (BCBP) Extractor
+
+Detects and parses PDF417 barcodes from boarding pass images.
+Extracts data according to IATA Resolution 792 standard.
+"""
+from typing import Optional, Dict, List
+from datetime import datetime, timedelta
+from pyzbar import pyzbar
+from PIL import Image
+import io
+
+
+class BCBPExtractor:
+    """Extract and parse IATA Bar Coded Boarding Pass data from barcodes."""
+
+    @staticmethod
+    def detect_and_extract(image_bytes: bytes) -> Optional[Dict]:
+        """
+        Detect barcodes in image and extract BCBP data.
+
+        Currently supports:
+        - PDF417 (most common on boarding passes)
+
+        Args:
+            image_bytes: Raw image bytes
+
+        Returns:
+            Parsed BCBP data dict or None if no valid barcode found
+        """
+        try:
+            # Open image
+            image = Image.open(io.BytesIO(image_bytes))
+
+            # Decode all barcodes in image
+            barcodes = pyzbar.decode(image)
+
+            if not barcodes:
+                return None
+
+            # Look for PDF417 barcode (most common on boarding passes)
+            for barcode in barcodes:
+                if barcode.type == 'PDF417':
+                    try:
+                        # Decode barcode data
+                        bcbp_string = barcode.data.decode('utf-8', errors='ignore')
+
+                        # Verify it's BCBP format (starts with 'M')
+                        if bcbp_string.startswith('M'):
+                            # Parse BCBP data
+                            parsed = BCBPParser.parse(bcbp_string)
+                            if parsed:
+                                print(f"✅ PDF417 barcode detected and parsed successfully")
+                                print(f"   Segments: {parsed.get('num_segments', 0)}")
+                                return parsed
+                    except Exception as e:
+                        print(f"⚠️  Error parsing PDF417 barcode: {e}")
+                        continue
+
+            print("ℹ️  No valid BCBP barcode found (PDF417)")
+            return None
+
+        except Exception as e:
+            print(f"⚠️  Error detecting barcodes: {e}")
+            return None
+
+
+class BCBPParser:
+    """
+    Parse IATA Bar Coded Boarding Pass (BCBP) format strings.
+
+    Reference: IATA Resolution 792
+    Format: M<num_legs><passenger_name><e_ticket><pnr><segment_data>...
+
+    Example:
+    M1SMITH/JOHN          EABC123 DXBJFKEK 0202 123Y012A0001 100
+    """
+
+    @staticmethod
+    def parse(bcbp_string: str) -> Optional[Dict]:
+        """
+        Parse BCBP format string.
+
+        Args:
+            bcbp_string: Raw BCBP data from barcode
+
+        Returns:
+            Parsed data dict with passenger info and segments, or None if invalid
+        """
+        if not bcbp_string or not bcbp_string.startswith('M'):
+            return None
+
+        try:
+            parsed = {
+                "format_code": bcbp_string[0],  # Always 'M'
+                "num_segments": int(bcbp_string[1]),
+                "raw_bcbp": bcbp_string,
+                "extraction_method": "barcode_pdf417",
+                "segments": []
+            }
+
+            # Parse mandatory section (positions 2-60)
+            if len(bcbp_string) < 60:
+                return None
+
+            # Passenger name (positions 2-22, 20 characters)
+            passenger_name = bcbp_string[2:22].strip()
+            parsed["passenger_name"] = passenger_name
+
+            # Parse passenger name (Last/First format)
+            if '/' in passenger_name:
+                parts = passenger_name.split('/', 1)
+                parsed["passenger_last_name"] = parts[0].strip()
+                parsed["passenger_first_name"] = parts[1].strip()
+
+            # Electronic ticket indicator (position 22)
+            parsed["electronic_ticket"] = bcbp_string[22] if len(bcbp_string) > 22 else None
+
+            # PNR/Booking reference (positions 23-29, 7 characters)
+            parsed["pnr"] = bcbp_string[23:30].strip()
+
+            # Parse each flight segment
+            num_segments = parsed["num_segments"]
+            pos = 30  # Start position of first segment
+
+            for segment_num in range(1, num_segments + 1):
+                # Each segment requires minimum 36 characters
+                if len(bcbp_string) < pos + 36:
+                    break
+
+                segment = BCBPParser._parse_segment(bcbp_string, pos, segment_num)
+                if segment:
+                    parsed["segments"].append(segment)
+
+                # Move to next segment (36 chars for mandatory + variable for conditional)
+                # For simplicity, we advance by 36 (can be enhanced to parse conditional section)
+                pos += 36
+
+            return parsed if parsed["segments"] else None
+
+        except Exception as e:
+            print(f"⚠️  Error parsing BCBP string: {e}")
+            return None
+
+    @staticmethod
+    def _parse_segment(bcbp_string: str, pos: int, segment_number: int) -> Optional[Dict]:
+        """
+        Parse a single flight segment from BCBP data.
+
+        Segment structure (36 characters minimum):
+        - Origin (3): Airport code
+        - Destination (3): Airport code
+        - Airline (3): Carrier code
+        - Flight number (5): Flight number
+        - Julian date (3): Day of year (001-366)
+        - Cabin class (1): Y/J/F/etc.
+        - Seat (4): Seat number
+        - Sequence (5): Check-in sequence number
+        - Passenger status (1): Status code
+        - Variable size field length (2): Conditional section size
+        - Followed by conditional data (variable)
+
+        Args:
+            bcbp_string: Full BCBP string
+            pos: Starting position of this segment
+            segment_number: Segment number (1-based)
+
+        Returns:
+            Parsed segment dict or None if invalid
+        """
+        try:
+            segment = {
+                "segment_number": segment_number
+            }
+
+            # Origin airport (3 chars)
+            segment["origin"] = bcbp_string[pos:pos+3].strip()
+
+            # Destination airport (3 chars)
+            segment["destination"] = bcbp_string[pos+3:pos+6].strip()
+
+            # Operating carrier (3 chars)
+            airline_code = bcbp_string[pos+6:pos+9].strip()
+            segment["airline_code"] = airline_code
+
+            # Flight number (5 chars)
+            flight_num = bcbp_string[pos+9:pos+14].strip()
+            segment["flight_number"] = flight_num
+
+            # Date of flight (Julian date - 3 digits, day of year)
+            julian_date_str = bcbp_string[pos+14:pos+17]
+            if julian_date_str.isdigit():
+                segment["julian_date"] = julian_date_str
+                segment["departure_date"] = BCBPParser._julian_to_date(julian_date_str)
+
+            # Compartment code (cabin class - 1 char)
+            segment["cabin_class"] = bcbp_string[pos+17] if len(bcbp_string) > pos+17 else None
+
+            # Seat number (4 chars)
+            seat = bcbp_string[pos+18:pos+22].strip()
+            segment["seat"] = seat if seat else None
+
+            # Check-in sequence number (5 chars)
+            segment["checkin_sequence"] = bcbp_string[pos+22:pos+27].strip()
+
+            # Passenger status (1 char)
+            segment["passenger_status"] = bcbp_string[pos+27] if len(bcbp_string) > pos+27 else None
+
+            # Variable size field length (2 chars) - indicates conditional section size
+            # We skip detailed parsing of conditional section for now
+
+            return segment
+
+        except Exception as e:
+            print(f"⚠️  Error parsing segment {segment_number}: {e}")
+            return None
+
+    @staticmethod
+    def _julian_to_date(julian_str: str) -> Optional[str]:
+        """
+        Convert Julian date (day of year) to ISO-8601 date.
+
+        Args:
+            julian_str: 3-digit Julian date (001-366)
+
+        Returns:
+            ISO-8601 date string (YYYY-MM-DD) or None if invalid
+        """
+        try:
+            julian_day = int(julian_str)
+            if not (1 <= julian_day <= 366):
+                return None
+
+            # Determine the year (assume current year or next year)
+            current_date = datetime.now()
+            year = current_date.year
+
+            # Calculate date
+            date = datetime(year, 1, 1) + timedelta(days=julian_day - 1)
+
+            # If date is more than 6 months in the past, assume it's next year
+            if date < current_date - timedelta(days=180):
+                date = datetime(year + 1, 1, 1) + timedelta(days=julian_day - 1)
+
+            return date.strftime("%Y-%m-%d")
+
+        except Exception:
+            return None
+
+
+# Convenience function
+def extract_bcbp_data(image_bytes: bytes) -> Optional[Dict]:
+    """
+    Extract BCBP data from boarding pass image.
+
+    Args:
+        image_bytes: Raw image bytes
+
+    Returns:
+        Parsed BCBP data or None if no barcode found
+    """
+    return BCBPExtractor.detect_and_extract(image_bytes)
