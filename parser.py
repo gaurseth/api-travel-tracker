@@ -1,6 +1,9 @@
 # parser.py
 from typing import Tuple, List
-from models.boarding_pass import BoardingPass, PassengerInfo, FlightInfo, BoardingInfo, RouteInfo, LocationInfo
+from models.boarding_pass import (
+    BoardingPass, PassengerInfo, FlightInfo, BoardingInfo,
+    RouteInfo, LocationInfo, ScheduleInfo, FlightSegment
+)
 from models.common import ExtractedValue, Warning
 from extractors.flight_number import extract_flight_number
 from extractors.passenger_name import extract_passenger_name
@@ -16,6 +19,9 @@ def parse_boarding_pass(text: str) -> Tuple[BoardingPass, float, List[Warning], 
     """
     Parses boarding pass text and returns a structured BoardingPass object with confidence metrics.
     All fields use ExtractedValue with confidence scoring.
+
+    Currently supports single-segment boarding passes (most common case).
+    Multi-segment detection can be added in the future.
 
     Returns:
         Tuple of (boarding_pass, overall_confidence, warnings, quality_label)
@@ -37,31 +43,35 @@ def parse_boarding_pass(text: str) -> Tuple[BoardingPass, float, List[Warning], 
     # ---------- Flight Number & Airline ----------
     flight_info = extract_flight_number(text, ocr_conf=1.0)
 
-    # ---------- Date ----------
-    date_info = extract_date(text, ocr_conf=1.0)
-
     flight_obj = FlightInfo(
         flight_number=flight_info["flightNumber"],
         airline_code=flight_info["airlineCode"],
-        operating_carrier=None,  # can be enhanced later
-        date=date_info["date_string"]
+        operating_carrier=None  # can be enhanced later
     )
 
     # ---------- Route ----------
     route_info = extract_route(text, ocr_conf=1.0)
 
-    route_obj = None
-    if route_info["origin"].value and route_info["destination"].value:
-        route_obj = RouteInfo(
-            origin=LocationInfo(
-                iata=route_info["origin"],
-                city=None  # can be enriched with airport lookup later
-            ),
-            destination=LocationInfo(
-                iata=route_info["destination"],
-                city=None
-            )
+    route_obj = RouteInfo(
+        origin=LocationInfo(
+            iata=route_info["origin"],
+            city=None  # can be enriched with airport lookup later
+        ),
+        destination=LocationInfo(
+            iata=route_info["destination"],
+            city=None
         )
+    )
+
+    # ---------- Schedule Info (dates and times) ----------
+    date_info = extract_date(text, ocr_conf=1.0)
+
+    schedule_obj = ScheduleInfo(
+        departure_date=date_info["date_string"],
+        departure_time=None,  # TODO: Add departure_time extractor
+        arrival_date=None,  # TODO: Add arrival_date extractor
+        arrival_time=None  # TODO: Add arrival_time extractor
+    )
 
     # ---------- Boarding Info ----------
     seat_result = extract_seat(text, ocr_conf=1.0)
@@ -79,17 +89,24 @@ def parse_boarding_pass(text: str) -> Tuple[BoardingPass, float, List[Warning], 
     pnr = extract_pnr(text, ocr_conf=1.0)
     ticket_number = extract_ticket_number(text, ocr_conf=1.0)
 
+    # ---------- Build Flight Segment ----------
+    segment = FlightSegment(
+        segment_number=1,  # Single segment for now
+        flight=flight_obj,
+        route=route_obj,
+        schedule=schedule_obj,
+        boarding=boarding_obj,
+        sequence_number=ticket_number if ticket_number.value else None
+    )
+
     # ---------- Build BoardingPass object ----------
     boarding_pass_obj = BoardingPass(
         passenger=passenger_obj,
-        flight=flight_obj,
         airline=None,  # can be enhanced with airline lookup
-        route=route_obj,
-        boarding=boarding_obj,
         pnr=pnr if pnr.value else None,
-        sequence_number=ticket_number if ticket_number.value else None,  # using ticket_number as sequence
         barcode=None,  # barcode detection can be added later
-        raw_ocr_text=text
+        raw_ocr_text=text,
+        segments=[segment]  # Single-segment array
     )
 
     # ---------- Compute Overall Confidence ----------

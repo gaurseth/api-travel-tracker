@@ -1,6 +1,6 @@
 """
-Trip service for managing trips in Firestore.
-Supports creating trips with or without boarding passes.
+Trip service for managing trips in Firestore with multi-segment support.
+Supports creating trips with or without boarding passes, and multiple segments per trip.
 """
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -8,17 +8,77 @@ import uuid
 from google.cloud import firestore
 
 from models.boarding_pass import BoardingPass
+from models.trip_segment import TripSegment
+from models.boarding_pass_attachment import BoardingPassAttachment
 from models.common import Warning
 from database import get_user_trips_collection, get_trip_ref
 
 
 class TripService:
-    """Service for managing trips in Firestore."""
+    """Service for managing trips in Firestore with multi-segment support."""
 
     @staticmethod
     def generate_trip_id() -> str:
         """Generate a unique trip ID."""
         return f"trip_{uuid.uuid4().hex[:16]}"
+
+    @staticmethod
+    def _generate_boarding_pass_id() -> str:
+        """Generate a unique boarding pass ID."""
+        return f"bp_{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def _create_segments_from_boarding_pass(
+        boarding_pass: BoardingPass,
+        boarding_pass_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert boarding pass segments to trip segments.
+
+        Args:
+            boarding_pass: Boarding pass object with segments
+            boarding_pass_id: ID to reference this boarding pass
+
+        Returns:
+            List of trip segment dictionaries
+        """
+        trip_segments = []
+
+        for bp_segment in boarding_pass.segments:
+            trip_segment = {
+                "segment_number": bp_segment.segment_number,
+
+                # Route
+                "origin": bp_segment.route.origin.iata.value if bp_segment.route.origin.iata.value else None,
+                "destination": bp_segment.route.destination.iata.value if bp_segment.route.destination.iata.value else None,
+
+                # Schedule
+                "departure_date": bp_segment.schedule.departure_date.value if bp_segment.schedule and bp_segment.schedule.departure_date else None,
+                "departure_time": bp_segment.schedule.departure_time.value if bp_segment.schedule and bp_segment.schedule.departure_time else None,
+                "arrival_date": bp_segment.schedule.arrival_date.value if bp_segment.schedule and bp_segment.schedule.arrival_date else None,
+                "arrival_time": bp_segment.schedule.arrival_time.value if bp_segment.schedule and bp_segment.schedule.arrival_time else None,
+
+                # Flight info
+                "airline_code": bp_segment.flight.airline_code.value if bp_segment.flight.airline_code.value else None,
+                "flight_number": bp_segment.flight.flight_number.value if bp_segment.flight.flight_number.value else None,
+                "operating_carrier": None,
+
+                # Boarding info
+                "seat": bp_segment.boarding.seat.value if bp_segment.boarding and bp_segment.boarding.seat else None,
+                "gate": bp_segment.boarding.gate.value if bp_segment.boarding and bp_segment.boarding.gate else None,
+                "boarding_time": bp_segment.boarding.time.value if bp_segment.boarding and bp_segment.boarding.time else None,
+
+                # Reference
+                "boarding_pass_id": boarding_pass_id,
+                "segment_index_in_pass": bp_segment.segment_number - 1,  # 0-indexed
+
+                # Metadata
+                "manually_entered": False,
+                "notes": None
+            }
+            trip_segments.append(trip_segment)
+
+        return trip_segments
 
     @staticmethod
     def create_trip_from_boarding_pass(
@@ -32,12 +92,12 @@ class TripService:
         extraction_method: str = "rules"
     ) -> Dict[str, Any]:
         """
-        Create a new trip from a scanned boarding pass.
+        Create a new trip from a scanned boarding pass (supports multi-segment passes).
 
         Args:
             user_id: User identifier
             tenant_id: Tenant identifier
-            boarding_pass: Parsed boarding pass object
+            boarding_pass: Parsed boarding pass object (may have multiple segments)
             overall_confidence: Overall extraction confidence
             quality_label: Quality label (excellent, good, medium, low)
             warnings: List of extraction warnings
@@ -48,19 +108,53 @@ class TripService:
             Dict containing trip_id and created document data
         """
         trip_id = TripService.generate_trip_id()
+        boarding_pass_id = TripService._generate_boarding_pass_id()
         created_at = datetime.utcnow()
 
-        # Extract key fields from boarding pass for indexing
-        origin = boarding_pass.route.origin.iata.value if boarding_pass.route and boarding_pass.route.origin else None
-        destination = boarding_pass.route.destination.iata.value if boarding_pass.route and boarding_pass.route.destination else None
+        # Create trip segments from boarding pass segments
+        trip_segments = TripService._create_segments_from_boarding_pass(
+            boarding_pass, boarding_pass_id
+        )
+
+        # Create boarding pass attachment
+        boarding_pass_attachment = {
+            "boarding_pass_id": boarding_pass_id,
+            "boarding_pass_data": boarding_pass.model_dump(mode='json'),
+            "segment_count": len(boarding_pass.segments),
+            "attached_at": created_at.isoformat(),
+            "extraction_metadata": {
+                "overall_confidence": overall_confidence,
+                "quality": quality_label,
+                "warnings": [w.model_dump() for w in warnings],
+                "method": extraction_method,
+                "engine_version": "1.0.0",
+                "extracted_at": created_at.isoformat()
+            },
+            "raw_ocr_text": raw_text
+        }
+
+        # Extract passenger name (common across all segments)
         passenger_name = boarding_pass.passenger.full_name.value if boarding_pass.passenger.full_name else None
-        flight_number = boarding_pass.flight.flight_number.value if boarding_pass.flight.flight_number else None
-        airline_code = boarding_pass.flight.airline_code.value if boarding_pass.flight.airline_code else None
-        flight_date = boarding_pass.flight.date.value if boarding_pass.flight.date else None
+
+        # Legacy fields (populated from first segment for backward compatibility)
+        first_segment = trip_segments[0] if trip_segments else {}
+        origin = first_segment.get("origin")
+        destination = trip_segments[-1].get("destination") if trip_segments else None  # Last segment's destination
+        departure_date = first_segment.get("departure_date")
+        arrival_date = trip_segments[-1].get("arrival_date") if trip_segments else None
+        airline_code = first_segment.get("airline_code")
+        flight_number = first_segment.get("flight_number")
 
         # Auto-generate title
-        title = f"{origin} → {destination}" if origin and destination else "Flight"
-        if flight_number:
+        if len(trip_segments) > 1:
+            # Multi-segment: "DXB → DOH → JFK"
+            route_str = " → ".join([seg.get("origin", "?") for seg in trip_segments] + [trip_segments[-1].get("destination", "?")])
+            title = route_str
+        else:
+            # Single segment
+            title = f"{origin} → {destination}" if origin and destination else "Flight"
+
+        if flight_number and len(trip_segments) == 1:
             title = f"{airline_code}{flight_number}: {title}"
 
         trip_data = {
@@ -71,29 +165,19 @@ class TripService:
             "created_at": created_at,
             "updated_at": created_at,
 
-            # Core trip fields (extracted from boarding pass)
+            # Multi-segment architecture (PRIMARY)
+            "segments": trip_segments,
+            "boarding_passes": [boarding_pass_attachment],
+
+            # Legacy fields (for backward compatibility)
             "origin": origin,
             "destination": destination,
-            "departure_date": flight_date,
-            "arrival_date": None,  # Can be added later
+            "departure_date": departure_date,
+            "arrival_date": arrival_date,
             "airline_code": airline_code,
             "flight_number": flight_number,
             "passenger_name": passenger_name,
-
-            # Boarding pass attachment
-            "boarding_pass": boarding_pass.model_dump(mode='json'),
-            "boarding_pass_attached": True,
             "raw_ocr_text": raw_text,
-
-            # Extraction metadata (only for scanned boarding passes)
-            "extraction_metadata": {
-                "overall_confidence": overall_confidence,
-                "quality": quality_label,
-                "warnings": [w.model_dump() for w in warnings],
-                "method": extraction_method,
-                "engine_version": "1.0.0",
-                "extracted_at": created_at.isoformat()
-            },
 
             # User fields
             "title": title,
@@ -106,7 +190,15 @@ class TripService:
             "metadata": {
                 "created_at": created_at.isoformat(),
                 "updated_at": created_at.isoformat(),
-                "source": "boarding_pass_scan"
+                "source": "boarding_pass_scan",
+                "extraction_metadata": {
+                    "overall_confidence": overall_confidence,
+                    "quality": quality_label,
+                    "warnings": [w.model_dump() for w in warnings],
+                    "method": extraction_method,
+                    "engine_version": "1.0.0",
+                    "extracted_at": created_at.isoformat()
+                }
             }
         }
 
@@ -139,6 +231,7 @@ class TripService:
     ) -> Dict[str, Any]:
         """
         Create a new trip manually (without boarding pass).
+        Creates a single-segment trip.
 
         Args:
             user_id: User identifier
@@ -162,6 +255,27 @@ class TripService:
         trip_id = TripService.generate_trip_id()
         created_at = datetime.utcnow()
 
+        # Create a single trip segment
+        segment = {
+            "segment_number": 1,
+            "origin": origin,
+            "destination": destination,
+            "departure_date": departure_date,
+            "departure_time": None,
+            "arrival_date": arrival_date,
+            "arrival_time": None,
+            "airline_code": airline_code,
+            "flight_number": flight_number,
+            "operating_carrier": None,
+            "seat": None,
+            "gate": None,
+            "boarding_time": None,
+            "boarding_pass_id": None,  # No boarding pass
+            "segment_index_in_pass": None,
+            "manually_entered": True,
+            "notes": notes
+        }
+
         # Auto-generate title if not provided
         if not title:
             if origin and destination:
@@ -177,7 +291,11 @@ class TripService:
             "created_at": created_at,
             "updated_at": created_at,
 
-            # Core trip fields
+            # Multi-segment architecture
+            "segments": [segment],
+            "boarding_passes": [],  # No boarding passes
+
+            # Legacy fields (for backward compatibility)
             "origin": origin,
             "destination": destination,
             "departure_date": departure_date,
@@ -185,12 +303,7 @@ class TripService:
             "airline_code": airline_code,
             "flight_number": flight_number,
             "passenger_name": passenger_name,
-
-            # No boarding pass
-            "boarding_pass": None,
-            "boarding_pass_attached": False,
             "raw_ocr_text": None,
-            "extraction_metadata": None,
 
             # User fields
             "title": title,
@@ -229,7 +342,8 @@ class TripService:
         extraction_method: str = "rules"
     ) -> bool:
         """
-        Attach a scanned boarding pass to an existing manual trip.
+        Attach a scanned boarding pass to an existing trip.
+        Adds new segments from the boarding pass and stores the boarding pass data.
 
         Args:
             user_id: User identifier
@@ -247,23 +361,49 @@ class TripService:
         trip_ref = get_trip_ref(user_id, trip_id)
 
         # Check if trip exists
-        if not trip_ref.get().exists:
+        trip_doc = trip_ref.get()
+        if not trip_doc.exists:
             return False
 
-        # Update with boarding pass data
-        updates = {
-            "boarding_pass": boarding_pass.model_dump(mode='json'),
-            "boarding_pass_attached": True,
-            "raw_ocr_text": raw_text,
+        trip_data = trip_doc.to_dict()
+        boarding_pass_id = TripService._generate_boarding_pass_id()
+        current_time = datetime.utcnow()
+
+        # Create new segments from boarding pass
+        new_segments = TripService._create_segments_from_boarding_pass(
+            boarding_pass, boarding_pass_id
+        )
+
+        # Update segment numbers (continue from existing segments)
+        existing_segments = trip_data.get("segments", [])
+        next_segment_number = len(existing_segments) + 1
+        for seg in new_segments:
+            seg["segment_number"] = next_segment_number
+            next_segment_number += 1
+
+        # Create boarding pass attachment
+        boarding_pass_attachment = {
+            "boarding_pass_id": boarding_pass_id,
+            "boarding_pass_data": boarding_pass.model_dump(mode='json'),
+            "segment_count": len(boarding_pass.segments),
+            "attached_at": current_time.isoformat(),
             "extraction_metadata": {
                 "overall_confidence": overall_confidence,
                 "quality": quality_label,
                 "warnings": [w.model_dump() for w in warnings],
                 "method": extraction_method,
                 "engine_version": "1.0.0",
-                "extracted_at": datetime.utcnow().isoformat()
+                "extracted_at": current_time.isoformat()
             },
-            "updated_at": datetime.utcnow()
+            "raw_ocr_text": raw_text
+        }
+
+        # Update trip
+        existing_boarding_passes = trip_data.get("boarding_passes", [])
+        updates = {
+            "segments": existing_segments + new_segments,
+            "boarding_passes": existing_boarding_passes + [boarding_pass_attachment],
+            "updated_at": current_time
         }
 
         trip_ref.update(updates)
@@ -438,6 +578,7 @@ class TripService:
         if not trips:
             return {
                 "total_trips": 0,
+                "total_segments": 0,
                 "total_flights": 0,
                 "airlines": [],
                 "destinations": [],
@@ -449,13 +590,27 @@ class TripService:
         destinations = set()
         origins = set()
         trip_types = {}
+        total_segments = 0
 
         for trip in trips:
             # Count trip types
             trip_type = trip.get("trip_type", "other")
             trip_types[trip_type] = trip_types.get(trip_type, 0) + 1
 
-            # Collect unique values
+            # Count segments
+            segments = trip.get("segments", [])
+            total_segments += len(segments)
+
+            # Collect unique values from segments
+            for segment in segments:
+                if segment.get("airline_code"):
+                    airlines.add(segment["airline_code"])
+                if segment.get("destination"):
+                    destinations.add(segment["destination"])
+                if segment.get("origin"):
+                    origins.add(segment["origin"])
+
+            # Also collect from legacy fields (backward compatibility)
             if trip.get("airline_code"):
                 airlines.add(trip["airline_code"])
             if trip.get("destination"):
@@ -465,6 +620,7 @@ class TripService:
 
         return {
             "total_trips": len(trips),
+            "total_segments": total_segments,
             "total_flights": trip_types.get("flight", 0),
             "trip_types": trip_types,
             "airlines": list(airlines),

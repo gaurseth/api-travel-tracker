@@ -1,11 +1,11 @@
 """
-Trip model - represents a travel trip that may or may not have a boarding pass.
+Trip model - represents a travel trip with multi-segment support.
 """
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from datetime import datetime
-from .boarding_pass import BoardingPass
-from .common import Warning
+from .trip_segment import TripSegment
+from .boarding_pass_attachment import BoardingPassAttachment
 
 
 class TripMetadata(BaseModel):
@@ -18,8 +18,18 @@ class TripMetadata(BaseModel):
 
 class Trip(BaseModel):
     """
-    A trip represents a journey that may or may not have a boarding pass attached.
-    Users can create trips manually or by scanning boarding passes.
+    A trip represents a journey with support for multiple segments.
+
+    Multi-segment architecture:
+    - segments: Array of flight legs (can be from one or multiple boarding passes)
+    - boarding_passes: Boarding passes stored at trip level (no duplication)
+    - Each segment references its boarding pass via boarding_pass_id
+
+    Scenarios:
+    1. Single-segment trip from boarding pass scan
+    2. Multi-segment trip from single boarding pass (connecting flights)
+    3. Multi-segment trip with separate boarding passes (outbound + return)
+    4. Manual trip with no boarding passes
     """
     trip_id: str
     user_id: str
@@ -28,22 +38,25 @@ class Trip(BaseModel):
     # Trip type
     trip_type: str = Field(default="flight")  # flight | train | bus | car | hotel | other
 
-    # Core trip details (can be filled manually or from boarding pass)
-    origin: Optional[str] = None  # IATA code or city name
-    destination: Optional[str] = None
-    departure_date: Optional[str] = None  # ISO-8601 date
-    arrival_date: Optional[str] = None
+    # Multi-segment support (PRIMARY)
+    segments: List[TripSegment] = Field(
+        default_factory=list,
+        description="List of trip segments (flight legs)"
+    )
+    boarding_passes: List[BoardingPassAttachment] = Field(
+        default_factory=list,
+        description="Boarding passes attached to this trip (stored at trip level)"
+    )
 
-    # Flight-specific (optional)
-    airline_code: Optional[str] = None
-    flight_number: Optional[str] = None
-
-    # Passenger info (optional)
+    # Legacy fields for backward compatibility (deprecated - use segments instead)
+    # These are populated from first segment for single-segment trips
+    origin: Optional[str] = Field(None, description="Deprecated: Use segments[0].origin")
+    destination: Optional[str] = Field(None, description="Deprecated: Use segments[0].destination")
+    departure_date: Optional[str] = Field(None, description="Deprecated: Use segments[0].departure_date")
+    arrival_date: Optional[str] = Field(None, description="Deprecated: Use segments[0].arrival_date")
+    airline_code: Optional[str] = Field(None, description="Deprecated: Use segments[0].airline_code")
+    flight_number: Optional[str] = Field(None, description="Deprecated: Use segments[0].flight_number")
     passenger_name: Optional[str] = None
-
-    # Optional boarding pass attachment
-    boarding_pass: Optional[BoardingPass] = None
-    boarding_pass_attached: bool = False
 
     # Raw data (only if from scan)
     raw_ocr_text: Optional[str] = None
@@ -59,3 +72,24 @@ class Trip(BaseModel):
 
     # User corrections (track changes made after initial extraction)
     user_corrections: List[dict] = Field(default_factory=list)
+
+    # Helper properties
+    @property
+    def is_multi_segment(self) -> bool:
+        """Check if this trip has multiple segments."""
+        return len(self.segments) > 1
+
+    @property
+    def segment_count(self) -> int:
+        """Total number of segments in this trip."""
+        return len(self.segments)
+
+    @property
+    def boarding_pass_count(self) -> int:
+        """Total number of boarding passes attached to this trip."""
+        return len(self.boarding_passes)
+
+    @property
+    def has_boarding_passes(self) -> bool:
+        """Check if any boarding passes are attached."""
+        return len(self.boarding_passes) > 0

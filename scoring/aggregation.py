@@ -71,8 +71,8 @@ def compute_overall_confidence(boarding_pass: BoardingPass) -> Tuple[float, List
         ))
 
     # Date (weight: 0.15)
-    if boarding_pass.flight and boarding_pass.flight.date:
-        conf = boarding_pass.flight.date.confidence
+    if boarding_pass.schedule and boarding_pass.schedule.departure_date:
+        conf = boarding_pass.schedule.departure_date.confidence
         scores.append(conf)
         weights.append(FIELD_WEIGHTS["date"])
 
