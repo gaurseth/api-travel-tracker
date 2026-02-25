@@ -2,9 +2,9 @@
 Trip Segment Model
 
 Represents a single flight leg/segment within a trip.
-A trip can contain multiple segments (e.g., outbound, return, connections).
+A trip can contain multiple segments (e.g., outbound connections, return journey).
 """
-from typing import Optional
+from typing import Optional, Literal
 from pydantic import BaseModel, Field
 
 
@@ -16,8 +16,18 @@ class TripSegment(BaseModel):
     - Created from a boarding pass scan
     - Manually entered by the user
     - Part of a multi-segment boarding pass
+    - An outward or return leg of the overall trip
     """
     segment_number: int = Field(ge=1, description="Segment number within the trip (1, 2, 3...)")
+
+    # Journey direction — used to compute trip-level origin/destination/dates
+    journey_type: Literal["outward", "return"] = Field(
+        default="outward",
+        description=(
+            "Whether this segment is part of the outward or return journey. "
+            "Trip-level origin/destination/dates are derived from outward segments only."
+        )
+    )
 
     # Route information
     origin: Optional[str] = Field(None, description="Origin airport IATA code (e.g., 'DXB')")
@@ -61,6 +71,7 @@ class TripSegment(BaseModel):
         json_schema_extra = {
             "example": {
                 "segment_number": 1,
+                "journey_type": "outward",
                 "origin": "DXB",
                 "destination": "JFK",
                 "departure_date": "2026-03-15",
