@@ -2,7 +2,7 @@
 import os
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from dotenv import load_dotenv
 import traceback
