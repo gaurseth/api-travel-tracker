@@ -115,6 +115,23 @@ class UpdateTripRequest(BaseModel):
     arrival_date: Optional[str] = None
 
 
+class SegmentInput(BaseModel):
+    """Request model for adding or updating a manual trip segment."""
+    journey_type: str = Field(default="outward", description="'outward' or 'return'")
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    departure_date: Optional[str] = None
+    departure_time: Optional[str] = None
+    arrival_date: Optional[str] = None
+    arrival_time: Optional[str] = None
+    airline_code: Optional[str] = None
+    flight_number: Optional[str] = None
+    seat: Optional[str] = None
+    gate: Optional[str] = None
+    boarding_time: Optional[str] = None
+    notes: Optional[str] = None
+
+
 # ============================================
 # Public Endpoints (No Auth Required)
 # ============================================
@@ -512,6 +529,86 @@ async def attach_boarding_pass(
                 "warnings": warnings
             }
         }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/trips/{trip_id}/segments", tags=["Trips"])
+async def add_segment(
+    trip_id: str,
+    request: SegmentInput,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Add a manually entered segment to an existing trip.
+
+    Recomputes the trip-level derived fields (origin, destination, dates)
+    from the updated outward segments after adding.
+    """
+    try:
+        result = TripService.add_manual_segment(
+            user_id=user_id,
+            trip_id=trip_id,
+            journey_type=request.journey_type,
+            origin=request.origin,
+            destination=request.destination,
+            departure_date=request.departure_date,
+            departure_time=request.departure_time,
+            arrival_date=request.arrival_date,
+            arrival_time=request.arrival_time,
+            airline_code=request.airline_code,
+            flight_number=request.flight_number,
+            seat=request.seat,
+            gate=request.gate,
+            boarding_time=request.boarding_time,
+            notes=request.notes,
+        )
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="Trip not found")
+
+        return {
+            "message": "Segment added successfully",
+            "trip_id": trip_id,
+            "segment_number": result["segment_number"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/trips/{trip_id}/segments/{segment_number}", tags=["Trips"])
+async def update_segment(
+    trip_id: str,
+    segment_number: int,
+    request: SegmentInput,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Update an existing manual segment within a trip.
+
+    Recomputes the trip-level derived fields after updating.
+    """
+    try:
+        updates = {k: v for k, v in request.model_dump().items() if v is not None}
+        success = TripService.update_manual_segment(
+            user_id=user_id,
+            trip_id=trip_id,
+            segment_number=segment_number,
+            **updates,
+        )
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Trip or segment not found")
+
+        return {"message": "Segment updated successfully", "trip_id": trip_id}
 
     except HTTPException:
         raise

@@ -415,6 +415,99 @@ class TripService:
         return True
 
     @staticmethod
+    def add_manual_segment(
+        user_id: str,
+        trip_id: str,
+        journey_type: str = "outward",
+        origin: Optional[str] = None,
+        destination: Optional[str] = None,
+        departure_date: Optional[str] = None,
+        departure_time: Optional[str] = None,
+        arrival_date: Optional[str] = None,
+        arrival_time: Optional[str] = None,
+        airline_code: Optional[str] = None,
+        flight_number: Optional[str] = None,
+        seat: Optional[str] = None,
+        gate: Optional[str] = None,
+        boarding_time: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Add a manually entered segment to an existing trip."""
+        trip_ref = get_trip_ref(user_id, trip_id)
+        trip_doc = trip_ref.get()
+        if not trip_doc.exists:
+            return None
+
+        trip_data = trip_doc.to_dict()
+        existing_segments = trip_data.get("segments", [])
+        next_num = len(existing_segments) + 1
+
+        new_seg = {
+            "segment_number":        next_num,
+            "journey_type":          journey_type,
+            "origin":                origin,
+            "destination":           destination,
+            "departure_date":        departure_date,
+            "departure_time":        departure_time,
+            "arrival_date":          arrival_date,
+            "arrival_time":          arrival_time,
+            "airline_code":          airline_code,
+            "flight_number":         flight_number,
+            "operating_carrier":     None,
+            "seat":                  seat,
+            "gate":                  gate,
+            "boarding_time":         boarding_time,
+            "boarding_pass_id":      None,
+            "segment_index_in_pass": None,
+            "manually_entered":      True,
+            "notes":                 notes,
+        }
+
+        all_segments = existing_segments + [new_seg]
+        derived = TripService._compute_derived_fields(all_segments)
+
+        trip_ref.update({
+            "segments":   all_segments,
+            "updated_at": datetime.utcnow(),
+            **derived,
+        })
+        return {"segment_number": next_num}
+
+    @staticmethod
+    def update_manual_segment(
+        user_id: str,
+        trip_id: str,
+        segment_number: int,
+        **kwargs
+    ) -> bool:
+        """Update a specific segment within a trip by its segment_number."""
+        trip_ref = get_trip_ref(user_id, trip_id)
+        trip_doc = trip_ref.get()
+        if not trip_doc.exists:
+            return False
+
+        trip_data = trip_doc.to_dict()
+        segments = list(trip_data.get("segments", []))
+
+        updated = False
+        for i, seg in enumerate(segments):
+            if seg.get("segment_number") == segment_number:
+                segments[i] = {**seg, **kwargs}
+                updated = True
+                break
+
+        if not updated:
+            return False
+
+        derived = TripService._compute_derived_fields(segments)
+        trip_ref.update({
+            "segments":   segments,
+            "updated_at": datetime.utcnow(),
+            **derived,
+        })
+        return True
+
+    @staticmethod
     def delete_trip(user_id: str, trip_id: str) -> bool:
         trip_ref = get_trip_ref(user_id, trip_id)
         if not trip_ref.get().exists:
