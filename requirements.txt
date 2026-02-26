@@ -9,4 +9,3 @@ google-cloud-firestore
 pydantic
 firebase-admin
 python-dotenv
-pyzbar  # For barcode detection (PDF417, QR codes, etc.)

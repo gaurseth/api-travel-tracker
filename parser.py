@@ -13,51 +13,47 @@ from extractors.date import extract_date
 from extractors.boarding_time import extract_boarding_time
 from extractors.pnr import extract_pnr, extract_ticket_number
 from extractors.gate import extract_gate
-from extractors.bcbp_extractor import extract_bcbp_data
+from extractors.bcbp_extractor import BCBPParser
 from scoring.aggregation import compute_overall_confidence, get_extraction_quality_label
 
 
-def parse_boarding_pass(
-    text: str,
-    image_bytes: Optional[bytes] = None
-) -> Tuple[BoardingPass, float, List[Warning], str]:
+def parse_boarding_pass(text: str) -> Tuple[BoardingPass, float, List[Warning], str]:
     """
-    Parses boarding pass using barcode (if available) and OCR text.
-
-    Extraction priority:
-    1. Try barcode extraction (PDF417) - most reliable
-    2. Fall back to OCR-based rule extraction
-    3. Merge data (barcode takes priority)
+    Parse a boarding pass from OCR text.
 
     Args:
-        text: OCR text from boarding pass
-        image_bytes: Optional image bytes for barcode detection
+        text: OCR text extracted from boarding pass image
 
     Returns:
         Tuple of (boarding_pass, overall_confidence, warnings, quality_label)
     """
-    # ---------- Try Barcode Extraction First ----------
-    bcbp_data = None
-    if image_bytes:
-        print("🔍 Attempting barcode detection (PDF417)...")
-        bcbp_data = extract_bcbp_data(image_bytes)
-
-        if bcbp_data:
-            print(f"✅ Barcode detected! Creating BoardingPass from barcode data...")
-            # Create BoardingPass from barcode data
-            boarding_pass = _create_boarding_pass_from_bcbp(bcbp_data, text)
-
-            # Barcode data has very high confidence
-            overall_confidence = 0.98  # Near-perfect for barcode
-            warnings = []
-            quality_label = "excellent"
-
-            print(f"📊 Barcode extraction confidence: {overall_confidence}")
-            return boarding_pass, overall_confidence, warnings, quality_label
-
-    # ---------- Fall Back to OCR Extraction ----------
     print("📄 Using OCR-based extraction...")
     return _parse_boarding_pass_from_ocr(text)
+
+
+def parse_boarding_pass_from_bcbp(
+    bcbp_string: str,
+    ocr_text: str = ""
+) -> Tuple[BoardingPass, float, List[Warning], str]:
+    """
+    Parse a boarding pass from a raw BCBP string (scanned by the frontend).
+
+    Args:
+        bcbp_string: Raw IATA BCBP string from a PDF417 barcode scan
+        ocr_text: Optional OCR text to store alongside (default empty)
+
+    Returns:
+        Tuple of (boarding_pass, overall_confidence, warnings, quality_label)
+
+    Raises:
+        ValueError: If the BCBP string is invalid or cannot be parsed
+    """
+    bcbp_data = BCBPParser.parse(bcbp_string)
+    if not bcbp_data:
+        raise ValueError("Invalid or unrecognised BCBP string. Must start with 'M' and contain at least one segment.")
+
+    boarding_pass = _create_boarding_pass_from_bcbp(bcbp_data, ocr_text)
+    return boarding_pass, 0.98, [], "excellent"
 
 
 def _create_boarding_pass_from_bcbp(bcbp_data: dict, ocr_text: str) -> BoardingPass:

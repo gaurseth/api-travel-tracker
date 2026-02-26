@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import traceback
 
 from ocr import extract_text
-from parser import parse_boarding_pass
+from parser import parse_boarding_pass, parse_boarding_pass_from_bcbp
 from services import TripService
 from auth import get_current_user, init_firebase
 
@@ -101,6 +101,13 @@ class CreateManualTripRequest(BaseModel):
     description: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
+
+
+class BoardingPassBarcodeRequest(BaseModel):
+    """Request model for creating/attaching from a frontend-scanned BCBP string."""
+    bcbp_string: str = Field(description="Raw IATA BCBP string from a PDF417 barcode scan")
+    tenant_id: str = Field(default="personal")
+    journey_type: str = Field(default="outward", description="'outward' or 'return'")
 
 
 class UpdateTripRequest(BaseModel):
@@ -237,6 +244,120 @@ async def extract_boarding_pass(
 
         return response
 
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# Barcode String Endpoints (Protected)
+# ============================================
+
+@app.post("/trips/from-barcode", status_code=201, tags=["Boarding Pass"])
+async def create_trip_from_barcode(
+    request: BoardingPassBarcodeRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Create a new trip from a BCBP string scanned by the frontend.
+
+    **Authentication Required**: User is automatically identified from auth token.
+
+    The frontend scans the PDF417 barcode and sends the raw BCBP string.
+    The backend parses the IATA BCBP format and creates a trip.
+
+    Args:
+        bcbp_string: Raw IATA BCBP string (must start with 'M')
+        tenant_id: Tenant identifier (default: "personal")
+        journey_type: "outward" or "return" (default: "outward")
+    """
+    try:
+        boarding_pass, confidence, warnings, quality = parse_boarding_pass_from_bcbp(
+            request.bcbp_string
+        )
+
+        trip_result = TripService.create_trip_from_boarding_pass(
+            user_id=user_id,
+            tenant_id=request.tenant_id,
+            boarding_pass=boarding_pass,
+            overall_confidence=confidence,
+            quality_label=quality,
+            warnings=warnings,
+            raw_text=request.bcbp_string,
+            extraction_method="barcode_pdf417"
+        )
+
+        return {
+            "trip_id": trip_result["trip_id"],
+            "created_at": trip_result["created_at"],
+            "extraction_metadata": {
+                "overall_confidence": confidence,
+                "quality": quality,
+                "method": "barcode_pdf417",
+            },
+            "message": "Trip created from barcode"
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/trips/{trip_id}/attach-barcode", tags=["Boarding Pass"])
+async def attach_barcode_to_trip(
+    trip_id: str,
+    request: BoardingPassBarcodeRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Attach a frontend-scanned BCBP barcode as new segment(s) to an existing trip.
+
+    **Authentication Required**: Only allows attaching to trips belonging to the authenticated user.
+
+    Useful for adding a return leg or connecting flight to an existing trip.
+
+    Args:
+        trip_id: ID of the existing trip
+        bcbp_string: Raw IATA BCBP string (must start with 'M')
+        journey_type: "outward" or "return" — how to classify the new segments
+    """
+    try:
+        boarding_pass, confidence, warnings, quality = parse_boarding_pass_from_bcbp(
+            request.bcbp_string
+        )
+
+        success = TripService.attach_boarding_pass_to_trip(
+            user_id=user_id,
+            trip_id=trip_id,
+            boarding_pass=boarding_pass,
+            overall_confidence=confidence,
+            quality_label=quality,
+            warnings=warnings,
+            raw_text=request.bcbp_string,
+            journey_type=request.journey_type,
+            extraction_method="barcode_pdf417"
+        )
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Trip not found")
+
+        return {
+            "message": "Barcode attached successfully",
+            "trip_id": trip_id,
+            "journey_type": request.journey_type,
+            "extraction_metadata": {
+                "overall_confidence": confidence,
+                "quality": quality,
+                "method": "barcode_pdf417",
+            }
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
