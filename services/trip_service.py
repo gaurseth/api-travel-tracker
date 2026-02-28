@@ -118,6 +118,72 @@ class TripService:
 
         return trip_segments
 
+    @staticmethod
+    def _insert_segment_ordered(
+        existing_segments: List[Dict[str, Any]],
+        new_segment: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Insert new_segment into existing_segments at the correct position
+        based on route chaining, then renumber all segment_numbers.
+
+        Matching is scoped to the same journey_type group so return segments
+        are never inserted into the middle of outward segments and vice versa.
+        Return segments always follow all outward segments in the final order.
+
+        Priority:
+          1. new.destination == existing.origin  → insert BEFORE that segment
+          2. new.origin      == existing.destination → insert AFTER that segment
+          3. No match → append to end of the same-journey_type group
+        """
+        journey_type = new_segment.get("journey_type", "outward")
+
+        # Segments missing journey_type are treated as "outward" (backward compatibility)
+        def _jtype(seg: Dict[str, Any]) -> str:
+            return seg.get("journey_type") or "outward"
+
+        # Normalise an IATA code for comparison (uppercase, stripped)
+        def _norm(code) -> str:
+            return code.strip().upper() if code else ""
+
+        # Split into journey groups (preserve existing order within each group)
+        outward = [s for s in existing_segments if _jtype(s) == "outward"]
+        return_ = [s for s in existing_segments if _jtype(s) == "return"]
+
+        group = outward if journey_type == "outward" else return_
+
+        new_origin = _norm(new_segment.get("origin"))
+        new_dest   = _norm(new_segment.get("destination"))
+        insert_at  = None
+
+        # Case 1: new segment leads into an existing segment
+        for i, seg in enumerate(group):
+            if new_dest and _norm(seg.get("origin")) == new_dest:
+                insert_at = i
+                break
+
+        # Case 2: new segment follows an existing segment
+        if insert_at is None:
+            for i, seg in enumerate(group):
+                if new_origin and _norm(seg.get("destination")) == new_origin:
+                    insert_at = i + 1
+                    break
+
+        # Case 3: no route match — append
+        if insert_at is None:
+            group.append(new_segment)
+        else:
+            group.insert(insert_at, new_segment)
+
+        # Reconstruct: outward always before return
+        all_segments = (group + return_) if journey_type == "outward" else (outward + group)
+
+        # Renumber sequentially from 1
+        for idx, seg in enumerate(all_segments, start=1):
+            seg["segment_number"] = idx
+
+        return all_segments
+
     # ------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------
@@ -318,17 +384,13 @@ class TripService:
         boarding_pass_id = TripService._generate_boarding_pass_id()
         current_time     = datetime.utcnow()
 
-        # Build new segments, continuing the segment_number sequence
+        # Build new segments then insert each one in route order
         new_segments = TripService._create_segments_from_boarding_pass(
             boarding_pass, boarding_pass_id, journey_type=journey_type
         )
-        existing_segments = trip_data.get("segments", [])
-        next_num = len(existing_segments) + 1
+        all_segments = trip_data.get("segments", [])
         for seg in new_segments:
-            seg["segment_number"] = next_num
-            next_num += 1
-
-        all_segments = existing_segments + new_segments
+            all_segments = TripService._insert_segment_ordered(all_segments, seg)
 
         bp_attachment = {
             "boarding_pass_id":   boarding_pass_id,
@@ -357,6 +419,121 @@ class TripService:
         }
 
         trip_ref.update(updates)
+        return True
+
+    @staticmethod
+    def add_manual_segment(
+        user_id: str,
+        trip_id: str,
+        journey_type: str = "outward",
+        origin: Optional[str] = None,
+        destination: Optional[str] = None,
+        departure_date: Optional[str] = None,
+        departure_time: Optional[str] = None,
+        arrival_date: Optional[str] = None,
+        arrival_time: Optional[str] = None,
+        airline_code: Optional[str] = None,
+        flight_number: Optional[str] = None,
+        seat: Optional[str] = None,
+        gate: Optional[str] = None,
+        boarding_time: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Add a manually entered segment to an existing trip.
+        Inserts the segment in route order and recomputes derived fields.
+
+        Returns a dict with the final segment_number, or None if trip not found.
+        """
+        trip_ref = get_trip_ref(user_id, trip_id)
+        trip_doc = trip_ref.get()
+        if not trip_doc.exists:
+            return None
+
+        trip_data    = trip_doc.to_dict()
+        current_time = datetime.utcnow()
+
+        new_segment = {
+            "journey_type":          journey_type,
+            "origin":                origin,
+            "destination":           destination,
+            "departure_date":        departure_date,
+            "departure_time":        departure_time,
+            "arrival_date":          arrival_date,
+            "arrival_time":          arrival_time,
+            "airline_code":          airline_code,
+            "flight_number":         flight_number,
+            "seat":                  seat,
+            "gate":                  gate,
+            "boarding_time":         boarding_time,
+            "boarding_pass_id":      None,
+            "segment_index_in_pass": None,
+            "manually_entered":      True,
+            "notes":                 notes,
+            # segment_number will be assigned by _insert_segment_ordered
+            "segment_number":        0,
+        }
+
+        all_segments = TripService._insert_segment_ordered(
+            trip_data.get("segments", []), new_segment
+        )
+        derived = TripService._compute_derived_fields(all_segments)
+
+        trip_ref.update({
+            "segments":   all_segments,
+            "updated_at": current_time,
+            **derived,
+        })
+
+        # Return the assigned segment_number so the endpoint can report it
+        assigned = next(s for s in all_segments if s is new_segment)
+        return {"segment_number": assigned["segment_number"]}
+
+    @staticmethod
+    def update_manual_segment(
+        user_id: str,
+        trip_id: str,
+        segment_number: int,
+        **updates: Any,
+    ) -> bool:
+        """
+        Update fields on an existing manually-entered segment.
+        Recomputes derived trip-level fields if route or date fields change.
+
+        Returns False if the trip or segment is not found, or if the segment
+        was not manually entered.
+        """
+        trip_ref = get_trip_ref(user_id, trip_id)
+        trip_doc = trip_ref.get()
+        if not trip_doc.exists:
+            return False
+
+        trip_data = trip_doc.to_dict()
+        segments  = trip_data.get("segments", [])
+
+        # Find the target segment
+        target = next((s for s in segments if s.get("segment_number") == segment_number), None)
+        if target is None or not target.get("manually_entered"):
+            return False
+
+        # Apply updates to the segment in-place
+        allowed = {
+            "journey_type", "origin", "destination",
+            "departure_date", "departure_time", "arrival_date", "arrival_time",
+            "airline_code", "flight_number", "seat", "gate", "boarding_time", "notes",
+        }
+        for key, value in updates.items():
+            if key in allowed:
+                target[key] = value
+
+        # Re-sort if journey_type changed (rare but safe to handle)
+        derived = TripService._compute_derived_fields(segments)
+
+        trip_ref.update({
+            "segments":   segments,
+            "updated_at": datetime.utcnow(),
+            **derived,
+        })
         return True
 
     @staticmethod

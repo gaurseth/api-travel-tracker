@@ -2,138 +2,201 @@
 IATA Bar Coded Boarding Pass (BCBP) Parser
 
 Parses BCBP format strings according to IATA Resolution 792.
-Barcode scanning is handled by the frontend; this module only
-converts the raw BCBP string into structured data.
+Correctly handles multi-segment boarding passes (1–8 segments)
+by reading the variable-length conditional data hex size at the
+end of each segment's mandatory block to locate the next segment.
+
+String layout:
+    [Shared header]           22 chars  (offsets 0–21)
+    [Segment 1 mandatory]     38 chars  (offsets 22–59, includes 2-char hex size at 58–59)
+    [Segment 1 conditional]   variable  (length = int("77", 16) etc.)
+    [Segment 2 mandatory]     37 chars  (no e-ticket indicator; hex size at relative offset 35–36)
+    [Segment 2 conditional]   variable
+    ... repeat for segments 3–8
 """
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from datetime import datetime, timedelta
 
 
 class BCBPParser:
-    """
-    Parse IATA Bar Coded Boarding Pass (BCBP) format strings.
-
-    Reference: IATA Resolution 792
-    Format: M<num_legs><passenger_name><e_ticket><pnr><segment_data>...
-
-    Example:
-    M1SMITH/JOHN          EABC123 DXBJFKEK 0202 123Y012A0001 100
-    """
+    """Parse IATA BCBP format strings (IATA Resolution 792)."""
 
     @staticmethod
     def parse(bcbp_string: str) -> Optional[Dict]:
         """
-        Parse BCBP format string.
+        Parse a full BCBP string into structured data.
 
         Args:
-            bcbp_string: Raw BCBP data from barcode
+            bcbp_string: Raw BCBP string from a PDF417 barcode scan. Must start with 'M'.
 
         Returns:
-            Parsed data dict with passenger info and segments, or None if invalid
+            Dict with passenger info and a list of segment dicts, or None if invalid.
         """
         if not bcbp_string or not bcbp_string.startswith('M'):
             return None
 
         try:
-            parsed = {
-                "format_code": bcbp_string[0],  # Always 'M'
-                "num_segments": int(bcbp_string[1]),
-                "raw_bcbp": bcbp_string,
-                "extraction_method": "barcode_pdf417",
-                "segments": []
-            }
+            num_segments = int(bcbp_string[1])
+        except (ValueError, IndexError):
+            return None
 
-            # Parse mandatory section (positions 2-60)
-            if len(bcbp_string) < 60:
-                return None
+        # Minimum viable length: shared header (22) + seg 1 mandatory (38) = 60
+        if len(bcbp_string) < 60:
+            return None
 
-            # Passenger name (positions 2-22, 20 characters)
+        try:
+            # ------------------------------------------------------------------
+            # Shared header  (offsets 0–21)
+            # ------------------------------------------------------------------
             passenger_name = bcbp_string[2:22].strip()
-            parsed["passenger_name"] = passenger_name
-
-            # Parse passenger name (Last/First format)
+            passenger_last = passenger_first = None
             if '/' in passenger_name:
                 parts = passenger_name.split('/', 1)
-                parsed["passenger_last_name"] = parts[0].strip()
-                parsed["passenger_first_name"] = parts[1].strip()
+                passenger_last  = parts[0].strip()
+                passenger_first = parts[1].strip()
 
-            # Electronic ticket indicator (position 22)
-            parsed["electronic_ticket"] = bcbp_string[22] if len(bcbp_string) > 22 else None
+            # ------------------------------------------------------------------
+            # Segment 1 mandatory  (offsets 22–59)
+            # e-ticket indicator at offset 22 is only present in segment 1.
+            # ------------------------------------------------------------------
+            seg1, seg1_var_hex = BCBPParser._parse_segment_mandatory(
+                bcbp_string, offset=22, is_first=True, segment_number=1
+            )
 
-            # PNR/Booking reference (positions 23-29, 7 characters)
-            parsed["pnr"] = bcbp_string[23:30].strip()
+            # 2-char hex at offsets 58–59 → decimal length of seg 1 conditional block
+            seg1_var_length = int(seg1_var_hex, 16)
 
-            # Parse each flight segment
-            num_segments = parsed["num_segments"]
-            pos = 30  # Start position of first segment
+            segments = [seg1]
 
-            for segment_num in range(1, num_segments + 1):
-                # Each segment requires minimum 36 characters
-                if len(bcbp_string) < pos + 36:
+            # ------------------------------------------------------------------
+            # Subsequent segments  (segment 2, 3, …)
+            # Each starts immediately after the previous segment's conditional block.
+            # ------------------------------------------------------------------
+            cursor = 60 + seg1_var_length  # start of segment 2 mandatory block
+
+            for seg_num in range(2, num_segments + 1):
+                # Repeated segment mandatory block is 37 chars
+                if cursor + 37 > len(bcbp_string):
+                    print(f"⚠️  BCBP string too short for segment {seg_num} (cursor={cursor}, len={len(bcbp_string)})")
                     break
 
-                segment = BCBPParser._parse_segment(bcbp_string, pos, segment_num)
-                if segment:
-                    parsed["segments"].append(segment)
+                seg, var_hex = BCBPParser._parse_segment_mandatory(
+                    bcbp_string, offset=cursor, is_first=False, segment_number=seg_num
+                )
+                segments.append(seg)
 
-                # Advance by 36 chars (mandatory section per segment)
-                pos += 36
+                var_length = int(var_hex, 16)
+                cursor = cursor + 37 + var_length  # advance past mandatory + conditional
 
-            return parsed if parsed["segments"] else None
+            return {
+                "format_code":          "M",
+                "num_segments":         num_segments,
+                "raw_bcbp":             bcbp_string,
+                "extraction_method":    "barcode_pdf417",
+                "passenger_name":       passenger_name,
+                "passenger_last_name":  passenger_last,
+                "passenger_first_name": passenger_first,
+                "electronic_ticket":    seg1.get("electronic_ticket"),
+                # Top-level PNR = segment 1's PNR (most common use-case)
+                "pnr":                  seg1.get("pnr"),
+                "segments":             segments,
+            }
 
         except Exception as e:
             print(f"⚠️  Error parsing BCBP string: {e}")
             return None
 
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _parse_segment(bcbp_string: str, pos: int, segment_number: int) -> Optional[Dict]:
+    def _parse_segment_mandatory(
+        bcbp_string: str,
+        offset: int,
+        is_first: bool,
+        segment_number: int,
+    ) -> Tuple[Dict, str]:
         """
-        Parse a single flight segment from BCBP data.
+        Parse the mandatory fields of one segment and return the hex size of its
+        conditional block so the caller can skip past it.
 
-        Segment structure (36 characters minimum):
-        - Origin (3): Airport code
-        - Destination (3): Airport code
-        - Airline (3): Carrier code
-        - Flight number (5): Flight number
-        - Julian date (3): Day of year (001-366)
-        - Cabin class (1): Y/J/F/etc.
-        - Seat (4): Seat number
-        - Sequence (5): Check-in sequence number
-        - Passenger status (1): Status code
-        - Variable size field length (2): Conditional section size
+        Segment 1 layout (is_first=True, offset=22):
+            offset+0:  e-ticket indicator  (1)
+            offset+1:  PNR                 (7)
+            offset+8:  origin              (3)
+            offset+11: destination         (3)
+            offset+14: carrier             (3)
+            offset+17: flight number       (5)
+            offset+22: Julian date         (3)
+            offset+25: compartment code    (1)
+            offset+26: seat number         (4)
+            offset+30: check-in sequence   (5)
+            offset+35: passenger status    (1)
+            offset+36: hex size            (2)  ← at absolute offsets 58–59
+            Total: 38 chars
+
+        Segment 2+ layout (is_first=False):
+            offset+0:  PNR                 (7)
+            offset+7:  origin              (3)
+            offset+10: destination         (3)
+            offset+13: carrier             (3)
+            offset+18: flight number       (5)  — note: 13+3=16, not 18
+            ... (see below)
+            Total: 37 chars
+
+        Returns:
+            (segment_dict, var_hex)  where var_hex is the 2-char hex string.
         """
-        try:
-            segment = {"segment_number": segment_number}
+        pos = offset
 
-            segment["origin"]        = bcbp_string[pos:pos+3].strip()
-            segment["destination"]   = bcbp_string[pos+3:pos+6].strip()
-            segment["airline_code"]  = bcbp_string[pos+6:pos+9].strip()
-            segment["flight_number"] = bcbp_string[pos+9:pos+14].strip()
+        # Electronic ticket indicator — only in segment 1
+        e_ticket = None
+        if is_first:
+            e_ticket = bcbp_string[pos]
+            pos += 1
 
-            julian_date_str = bcbp_string[pos+14:pos+17]
-            if julian_date_str.isdigit():
-                segment["julian_date"]    = julian_date_str
-                segment["departure_date"] = BCBPParser._julian_to_date(julian_date_str)
+        # Fields common to all segments
+        pnr             = bcbp_string[pos:pos+7].strip();  pos += 7
+        origin          = bcbp_string[pos:pos+3].strip();  pos += 3
+        destination     = bcbp_string[pos:pos+3].strip();  pos += 3
+        airline_code    = bcbp_string[pos:pos+3].strip();  pos += 3
+        flight_number   = bcbp_string[pos:pos+5].strip();  pos += 5
+        julian_str      = bcbp_string[pos:pos+3];          pos += 3
+        compartment     = bcbp_string[pos];                 pos += 1
+        seat            = bcbp_string[pos:pos+4].strip();  pos += 4
+        checkin_seq     = bcbp_string[pos:pos+5].strip();  pos += 5
+        passenger_status= bcbp_string[pos];                 pos += 1
+        var_hex         = bcbp_string[pos:pos+2]           # do NOT advance pos — caller uses this
 
-            segment["cabin_class"]        = bcbp_string[pos+17] if len(bcbp_string) > pos+17 else None
-            seat                          = bcbp_string[pos+18:pos+22].strip()
-            segment["seat"]               = seat if seat else None
-            segment["checkin_sequence"]   = bcbp_string[pos+22:pos+27].strip()
-            segment["passenger_status"]   = bcbp_string[pos+27] if len(bcbp_string) > pos+27 else None
+        departure_date = BCBPParser._julian_to_date(julian_str) if julian_str.isdigit() else None
 
-            return segment
+        segment = {
+            "segment_number":   segment_number,
+            "electronic_ticket": e_ticket,
+            "pnr":               pnr,
+            "origin":            origin,
+            "destination":       destination,
+            "airline_code":      airline_code,
+            "flight_number":     flight_number,
+            "julian_date":       julian_str,
+            "departure_date":    departure_date,
+            "cabin_class":       compartment,
+            "seat":              seat if seat else None,
+            "checkin_sequence":  checkin_seq,
+            "passenger_status":  passenger_status,
+        }
 
-        except Exception as e:
-            print(f"⚠️  Error parsing segment {segment_number}: {e}")
-            return None
+        return segment, var_hex
 
     @staticmethod
     def _julian_to_date(julian_str: str) -> Optional[str]:
         """
-        Convert Julian date (day of year) to ISO-8601 date.
+        Convert a 3-digit Julian day-of-year to an ISO-8601 date string.
 
-        Assumes current year; shifts to next year if the date is
-        more than 6 months in the past.
+        The year is not encoded in the mandatory block; we assume the current
+        year and shift to next year if the resulting date is more than 6 months
+        in the past (handles year-boundary bookings).
         """
         try:
             julian_day = int(julian_str)
