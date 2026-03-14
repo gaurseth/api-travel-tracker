@@ -44,6 +44,10 @@ class TripSegment(BaseModel):
     flight_number: Optional[str] = Field(None, description="Flight number (e.g., 'EK202')")
     operating_carrier: Optional[str] = Field(None, description="Operating carrier if codeshare")
 
+    # Booking
+    pnr: Optional[str] = Field(None, description="PNR / booking reference code")
+    cabin_class: Optional[str] = Field(None, description="Cabin class code (e.g., 'Y', 'J', 'F')")
+
     # Boarding information
     seat: Optional[str] = Field(None, description="Seat assignment (e.g., '12A')")
     gate: Optional[str] = Field(None, description="Gate number (e.g., 'A12')")
@@ -59,6 +63,14 @@ class TripSegment(BaseModel):
         ge=0,
         description="Index of this segment within the boarding pass (0, 1, 2...)"
     )
+
+    # Passenger
+    passenger_name: Optional[str] = Field(None, description="Passenger name for this segment")
+
+    # Computed flight info
+    distance_miles: Optional[float] = Field(None, description="Estimated flight distance in miles")
+    travel_duration_minutes: Optional[int] = Field(None, description="Estimated travel time in minutes")
+    segment_type: Optional[str] = Field(None, description="'international' or 'domestic' based on origin/destination countries")
 
     # Metadata
     manually_entered: bool = Field(
@@ -85,6 +97,9 @@ class TripSegment(BaseModel):
                 "boarding_time": "09:30",
                 "boarding_pass_id": "bp_abc123",
                 "segment_index_in_pass": 0,
+                "distance_miles": 7013.2,
+                "travel_duration_minutes": 872,
+                "segment_type": "international",
                 "manually_entered": False
             }
         }

@@ -1,14 +1,24 @@
 """
 Trip service for managing trips in Firestore with multi-segment support.
 """
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from typing import List, Optional, Dict, Any, Tuple
+from datetime import datetime, timedelta
+import re
 import uuid
 from google.cloud import firestore
 
 from models.boarding_pass import BoardingPass
 from models.common import Warning
 from database import get_user_trips_collection, get_trip_ref
+from services.flight_helpers import estimate_flight_distance, get_trip_type, estimate_travel_time
+
+
+# Keys present in every flat segment dict produced by conversion helpers
+_SEGMENT_KEYS = (
+    "origin", "destination", "airline_code", "flight_number",
+    "departure_date", "departure_time", "arrival_date", "arrival_time",
+    "seat", "gate", "boarding_time", "pnr", "cabin_class", "passenger_name",
+)
 
 
 class TripService:
@@ -52,8 +62,8 @@ class TripService:
             return "Trip"
 
         # Build route chain: A → B → C
-        stops = [outward[0].get("origin", "?")] + \
-                [s.get("destination", "?") for s in outward]
+        stops = [outward[0].get("origin") or "?"] + \
+                [s.get("destination") or "?" for s in outward]
         title = " → ".join(stops)
 
         # Prefix with flight number for single-leg trips
@@ -64,6 +74,21 @@ class TripService:
                 title = f"{airline}{flight}: {title}"
 
         return title
+
+    @staticmethod
+    def _enrich_segment(seg: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute distance_miles, travel_duration_minutes, segment_type from origin/destination."""
+        origin = seg.get("origin")
+        dest = seg.get("destination")
+        if origin and dest:
+            seg["distance_miles"] = estimate_flight_distance(origin, dest)
+            seg["travel_duration_minutes"] = estimate_travel_time(origin, dest)
+            seg["segment_type"] = get_trip_type(origin, dest)
+        else:
+            seg["distance_miles"] = None
+            seg["travel_duration_minutes"] = None
+            seg["segment_type"] = None
+        return seg
 
     @staticmethod
     def _create_segments_from_boarding_pass(
@@ -110,10 +135,21 @@ class TripService:
                 "boarding_pass_id":       boarding_pass_id,
                 "segment_index_in_pass":  bp_seg.segment_number - 1,
 
+                # Booking
+                "pnr":         boarding_pass.pnr.value if boarding_pass.pnr else None,
+                "cabin_class": None,
+
+                # Passenger
+                "passenger_name": (
+                    boarding_pass.passenger.full_name.value
+                    if boarding_pass.passenger.full_name else None
+                ),
+
                 # Metadata
                 "manually_entered": False,
                 "notes":            None,
             }
+            TripService._enrich_segment(trip_segment)
             trip_segments.append(trip_segment)
 
         return trip_segments
@@ -183,6 +219,468 @@ class TripService:
             seg["segment_number"] = idx
 
         return all_segments
+
+    # ------------------------------------------------------------------
+    # Segment conversion helpers (extraction → flat dicts)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def bcbp_data_to_segment_dicts(bcbp_data: dict) -> List[Dict[str, Any]]:
+        """
+        Convert raw BCBPParser.parse() output to flat segment dicts.
+        Used by /extract-from-scan and /process-boarding-pass.
+        """
+        passenger_name = bcbp_data.get("passenger_name")
+        top_pnr = bcbp_data.get("pnr")
+
+        segments = []
+        for seg in bcbp_data.get("segments", []):
+            segments.append({
+                "origin":          seg.get("origin"),
+                "destination":     seg.get("destination"),
+                "airline_code":    seg.get("airline_code"),
+                "flight_number":   seg.get("flight_number"),
+                "departure_date":  seg.get("departure_date"),
+                "departure_time":  None,
+                "arrival_date":    None,
+                "arrival_time":    None,
+                "seat":            seg.get("seat"),
+                "gate":            None,
+                "boarding_time":   None,
+                "pnr":             seg.get("pnr") or top_pnr,
+                "cabin_class":     seg.get("cabin_class"),
+                "passenger_name":  passenger_name,
+            })
+        return segments
+
+    @staticmethod
+    def boarding_pass_to_segment_dicts(boarding_pass: BoardingPass) -> List[Dict[str, Any]]:
+        """
+        Convert OCR-parsed BoardingPass model to flat segment dicts.
+        Used by /extract-from-image and /process-boarding-pass.
+        """
+        pnr_val = boarding_pass.pnr.value if boarding_pass.pnr else None
+        passenger_name = (
+            boarding_pass.passenger.full_name.value
+            if boarding_pass.passenger.full_name else None
+        )
+
+        segments = []
+        for bp_seg in boarding_pass.segments:
+            segments.append({
+                "origin":         bp_seg.route.origin.iata.value if bp_seg.route.origin.iata and bp_seg.route.origin.iata.value else None,
+                "destination":    bp_seg.route.destination.iata.value if bp_seg.route.destination.iata and bp_seg.route.destination.iata.value else None,
+                "airline_code":   bp_seg.flight.airline_code.value if bp_seg.flight.airline_code and bp_seg.flight.airline_code.value else None,
+                "flight_number":  bp_seg.flight.flight_number.value if bp_seg.flight.flight_number and bp_seg.flight.flight_number.value else None,
+                "departure_date": bp_seg.schedule.departure_date.value if bp_seg.schedule and bp_seg.schedule.departure_date else None,
+                "departure_time": bp_seg.schedule.departure_time.value if bp_seg.schedule and bp_seg.schedule.departure_time else None,
+                "arrival_date":   bp_seg.schedule.arrival_date.value if bp_seg.schedule and bp_seg.schedule.arrival_date else None,
+                "arrival_time":   bp_seg.schedule.arrival_time.value if bp_seg.schedule and bp_seg.schedule.arrival_time else None,
+                "seat":           bp_seg.boarding.seat.value if bp_seg.boarding and bp_seg.boarding.seat else None,
+                "gate":           bp_seg.boarding.gate.value if bp_seg.boarding and bp_seg.boarding.gate else None,
+                "boarding_time":  bp_seg.boarding.time.value if bp_seg.boarding and bp_seg.boarding.time else None,
+                "pnr":            pnr_val,
+                "cabin_class":    None,
+                "passenger_name": passenger_name,
+            })
+        return segments
+
+    # ------------------------------------------------------------------
+    # Field validation helpers (Guardrail 3)
+    # ------------------------------------------------------------------
+
+    _IATA_RE = re.compile(r"^[A-Z]{3}$")
+    _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
+    _FLIGHT_NUM_RE = re.compile(r"^\d{1,5}[A-Z]?$")
+
+    @staticmethod
+    def _validate_ocr_field(key: str, value) -> bool:
+        """
+        Guardrail 3: Sanity-check an OCR-extracted field value before merge.
+        Returns True if the value is acceptable, False if it should be discarded.
+        """
+        if value is None:
+            return True  # nothing to validate
+
+        val = str(value).strip()
+        if not val:
+            return True
+
+        if key in ("origin", "destination"):
+            return bool(TripService._IATA_RE.match(val.upper()))
+
+        if key in ("departure_date", "arrival_date"):
+            if not TripService._DATE_RE.match(val):
+                return False
+            try:
+                d = datetime.fromisoformat(val)
+                # reject dates more than 2 years in the past or future
+                now = datetime.utcnow()
+                return abs((d - now).days) < 730
+            except ValueError:
+                return False
+
+        if key in ("departure_time", "arrival_time", "boarding_time"):
+            return bool(TripService._TIME_RE.match(val))
+
+        if key == "flight_number":
+            return bool(TripService._FLIGHT_NUM_RE.match(val.upper()))
+
+        if key == "airline_code":
+            # 2-3 uppercase alphanumeric chars
+            return bool(re.match(r"^[A-Z0-9]{2,3}$", val.upper()))
+
+        # For other fields (seat, gate, pnr, cabin_class, passenger_name) — accept as-is
+        return True
+
+    # ------------------------------------------------------------------
+    # Segment merge
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_segments(
+        barcode_segments: List[Dict[str, Any]],
+        ocr_segments: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """
+        Merge barcode-extracted and OCR-extracted segments with guardrails.
+
+        Guardrails (when barcode is present):
+          1. Segment count cap: OCR cannot produce more segments than barcode.
+             Extra OCR segments are dropped.
+          2. Route validation: Only merge OCR segments whose origin+destination
+             match a barcode segment. Unmatched OCR segments are discarded.
+          3. Field sanity: OCR values are validated before merging (IATA codes,
+             dates, times, flight numbers). Invalid values are dropped.
+
+        When barcode_segments is empty (OCR-only mode), guardrails 1-2 are
+        skipped and only field sanity (3) is applied.
+
+        Returns:
+            (merged_segments, warnings) — warnings list describes any
+            discarded data for transparency.
+        """
+        warnings: List[str] = []
+
+        # OCR-only mode: apply field sanity checks only
+        if not barcode_segments:
+            sanitised = []
+            for seg in ocr_segments:
+                clean = {}
+                for key in _SEGMENT_KEYS:
+                    val = seg.get(key)
+                    if TripService._validate_ocr_field(key, val):
+                        clean[key] = val
+                    else:
+                        clean[key] = None
+                        warnings.append(f"OCR field '{key}' discarded (invalid: {val!r})")
+                sanitised.append(clean)
+            return sanitised, warnings
+
+        def _norm(val):
+            return val.strip().upper() if val else ""
+
+        # --- Guardrail 1: cap OCR segment count to barcode count ---
+        barcode_count = len(barcode_segments)
+        capped_ocr = ocr_segments[:barcode_count]
+        if len(ocr_segments) > barcode_count:
+            dropped = len(ocr_segments) - barcode_count
+            warnings.append(
+                f"Guardrail: dropped {dropped} extra OCR segment(s) "
+                f"(barcode has {barcode_count})"
+            )
+
+        # --- Guardrail 2 + 3: route-match then field-validate ---
+        ocr_used: set = set()
+        merged: List[Dict[str, Any]] = []
+
+        for bs in barcode_segments:
+            # Find a matching OCR segment by route
+            match_idx = None
+            for j, os_ in enumerate(capped_ocr):
+                if j in ocr_used:
+                    continue
+                if (_norm(bs.get("origin")) == _norm(os_.get("origin"))
+                        and _norm(bs.get("destination")) == _norm(os_.get("destination"))):
+                    match_idx = j
+                    break
+
+            if match_idx is not None:
+                ocr_used.add(match_idx)
+                os_ = capped_ocr[match_idx]
+                # Merge field by field: barcode wins; OCR fills gaps with validation
+                combined = {}
+                for key in _SEGMENT_KEYS:
+                    bc_val = bs.get(key)
+                    ocr_val = os_.get(key)
+
+                    if bc_val is not None:
+                        # Barcode value exists — use it (Guardrail 5: barcode is truth)
+                        if ocr_val is not None and _norm(str(bc_val)) != _norm(str(ocr_val)):
+                            warnings.append(
+                                f"Field '{key}' conflict: barcode={bc_val!r} vs OCR={ocr_val!r}, keeping barcode"
+                            )
+                        combined[key] = bc_val
+                    elif ocr_val is not None:
+                        # Only OCR has a value — validate before accepting
+                        if TripService._validate_ocr_field(key, ocr_val):
+                            combined[key] = ocr_val
+                        else:
+                            combined[key] = None
+                            warnings.append(f"OCR field '{key}' discarded (invalid: {ocr_val!r})")
+                    else:
+                        combined[key] = None
+
+                merged.append(combined)
+            else:
+                # No OCR match — use barcode segment as-is
+                merged.append(dict(bs))
+
+        # Guardrail 2: discard unmatched OCR segments (route didn't match any barcode segment)
+        for j, os_ in enumerate(capped_ocr):
+            if j not in ocr_used:
+                route = f"{os_.get('origin', '?')}->{os_.get('destination', '?')}"
+                warnings.append(
+                    f"Guardrail: discarded OCR segment {j+1} (route {route} "
+                    f"doesn't match any barcode segment)"
+                )
+
+        return merged, warnings
+
+    # ------------------------------------------------------------------
+    # Trip matching
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def find_matching_trip(
+        user_id: str,
+        segments: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find an existing trip that the new segments likely belong to.
+
+        Query: trips where arrival_date is within ±3 days of the first
+               new segment's departure_date.
+        Scoring (tiered):
+            +50  Same PNR
+            +30  Route continuity (trip destination == new segment origin)
+            +20  Time gap ≤ 24 h
+            +10  Time gap 24–48 h  (mutually exclusive with +20)
+
+        Returns {"trip_id": str, "score": int} if best score ≥ 40, else None.
+        """
+        first_dep = segments[0].get("departure_date") if segments else None
+        if not first_dep:
+            return None
+
+        try:
+            dep_date = datetime.fromisoformat(first_dep)
+        except ValueError:
+            return None
+
+        date_min = (dep_date - timedelta(days=3)).strftime("%Y-%m-%d")
+        date_max = (dep_date + timedelta(days=3)).strftime("%Y-%m-%d")
+
+        # Query trips whose arrival_date is near the new segment's departure
+        trips_ref = get_user_trips_collection(user_id)
+        candidates = list(
+            trips_ref
+            .where("arrival_date", ">=", date_min)
+            .where("arrival_date", "<=", date_max)
+            .stream()
+        )
+
+        if not candidates:
+            return None
+
+        new_pnrs = {s.get("pnr").strip().upper() for s in segments if s.get("pnr")}
+        new_origin = segments[0].get("origin", "").strip().upper() if segments[0].get("origin") else ""
+
+        best_trip_id = None
+        best_score = 0
+
+        for doc in candidates:
+            trip = doc.to_dict()
+            score = 0
+
+            # --- PNR match ---
+            existing_pnrs: set = set()
+            for seg in trip.get("segments", []):
+                if seg.get("pnr"):
+                    existing_pnrs.add(seg["pnr"].strip().upper())
+            # Also check boarding pass attachments for PNR
+            for bp in trip.get("boarding_passes", []):
+                bp_data = bp.get("boarding_pass_data", {})
+                if bp_data.get("pnr") and isinstance(bp_data["pnr"], dict):
+                    pnr_val = bp_data["pnr"].get("value")
+                    if pnr_val:
+                        existing_pnrs.add(pnr_val.strip().upper())
+
+            if new_pnrs & existing_pnrs:
+                score += 50
+
+            # --- Route continuity ---
+            trip_dest = (trip.get("destination") or "").strip().upper()
+            if trip_dest and new_origin and trip_dest == new_origin:
+                score += 30
+
+            # --- Time gap ---
+            trip_arrival = trip.get("arrival_date")
+            if trip_arrival:
+                try:
+                    arr = datetime.fromisoformat(trip_arrival)
+                    gap_hours = abs((dep_date - arr).total_seconds()) / 3600
+                    if gap_hours <= 24:
+                        score += 20
+                    elif gap_hours <= 48:
+                        score += 10
+                except ValueError:
+                    pass
+
+            if score > best_score:
+                best_score = score
+                best_trip_id = trip.get("trip_id")
+
+        if best_score >= 40 and best_trip_id:
+            return {"trip_id": best_trip_id, "score": best_score}
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Create / attach from flat segment dicts
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_trip_from_segments(
+        user_id: str,
+        tenant_id: str,
+        segments: List[Dict[str, Any]],
+        journey_type: str = "outward",
+        passenger_name: Optional[str] = None,
+        extraction_metadata: Optional[Dict[str, Any]] = None,
+        raw_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new trip from pre-flattened segment dicts.
+        Used by /process-boarding-pass after merge.
+        """
+        trip_id          = TripService.generate_trip_id()
+        boarding_pass_id = TripService._generate_boarding_pass_id()
+        created_at       = datetime.utcnow()
+
+        # Prepare segment dicts with trip-specific fields
+        trip_segments = []
+        for idx, seg in enumerate(segments):
+            trip_seg = {
+                **{k: seg.get(k) for k in _SEGMENT_KEYS},
+                "segment_number":        idx + 1,
+                "journey_type":          journey_type,
+                "operating_carrier":     None,
+                "boarding_pass_id":      boarding_pass_id,
+                "segment_index_in_pass": idx,
+                "manually_entered":      False,
+                "notes":                 None,
+            }
+            TripService._enrich_segment(trip_seg)
+            trip_segments.append(trip_seg)
+
+        derived = TripService._compute_derived_fields(trip_segments)
+
+        if not passenger_name:
+            passenger_name = segments[0].get("passenger_name") if segments else None
+
+        bp_attachment = {
+            "boarding_pass_id":    boarding_pass_id,
+            "boarding_pass_data":  {},
+            "segment_count":       len(segments),
+            "attached_at":         created_at.isoformat(),
+            "extraction_metadata": extraction_metadata or {},
+            "raw_ocr_text":        raw_text,
+        }
+
+        trip_data = {
+            "trip_id":          trip_id,
+            "user_id":          user_id,
+            "tenant_id":        tenant_id,
+            "trip_type":        "flight",
+            "created_at":       created_at,
+            "updated_at":       created_at,
+            "segments":         trip_segments,
+            "boarding_passes":  [bp_attachment],
+            "passenger_name":   passenger_name,
+            **derived,
+            "title":            TripService._generate_title(trip_segments),
+            "description":      None,
+            "notes":            None,
+            "tags":             [],
+            "user_corrections": [],
+            "metadata": {
+                "created_at": created_at.isoformat(),
+                "updated_at": created_at.isoformat(),
+                "source":     "boarding_pass_scan",
+                "extraction_metadata": extraction_metadata or {},
+            },
+        }
+
+        get_trip_ref(user_id, trip_id).set(trip_data)
+        return {"trip_id": trip_id, "created_at": created_at.isoformat()}
+
+    @staticmethod
+    def attach_segments_to_trip(
+        user_id: str,
+        trip_id: str,
+        segments: List[Dict[str, Any]],
+        journey_type: str = "outward",
+        extraction_metadata: Optional[Dict[str, Any]] = None,
+        raw_text: Optional[str] = None,
+    ) -> bool:
+        """
+        Attach pre-flattened segment dicts to an existing trip.
+        Uses _insert_segment_ordered for route chaining, recomputes derived fields.
+        """
+        trip_ref = get_trip_ref(user_id, trip_id)
+        trip_doc = trip_ref.get()
+        if not trip_doc.exists:
+            return False
+
+        trip_data        = trip_doc.to_dict()
+        boarding_pass_id = TripService._generate_boarding_pass_id()
+        current_time     = datetime.utcnow()
+
+        all_segments = trip_data.get("segments", [])
+        for idx, seg in enumerate(segments):
+            new_seg = {
+                **{k: seg.get(k) for k in _SEGMENT_KEYS},
+                "segment_number":        0,  # assigned by _insert_segment_ordered
+                "journey_type":          journey_type,
+                "operating_carrier":     None,
+                "boarding_pass_id":      boarding_pass_id,
+                "segment_index_in_pass": idx,
+                "manually_entered":      False,
+                "notes":                 None,
+            }
+            TripService._enrich_segment(new_seg)
+            all_segments = TripService._insert_segment_ordered(all_segments, new_seg)
+
+        bp_attachment = {
+            "boarding_pass_id":    boarding_pass_id,
+            "boarding_pass_data":  {},
+            "segment_count":       len(segments),
+            "attached_at":         current_time.isoformat(),
+            "extraction_metadata": extraction_metadata or {},
+            "raw_ocr_text":        raw_text,
+        }
+
+        derived = TripService._compute_derived_fields(all_segments)
+
+        trip_ref.update({
+            "segments":        all_segments,
+            "boarding_passes": trip_data.get("boarding_passes", []) + [bp_attachment],
+            "updated_at":      current_time,
+            **derived,
+        })
+        return True
 
     # ------------------------------------------------------------------
     # Public methods
@@ -316,6 +814,7 @@ class TripService:
             "manually_entered":      True,
             "notes":                 None,
         }
+        TripService._enrich_segment(segment)
 
         segments = [segment]
         derived  = TripService._compute_derived_fields(segments)
@@ -473,6 +972,7 @@ class TripService:
             # segment_number will be assigned by _insert_segment_ordered
             "segment_number":        0,
         }
+        TripService._enrich_segment(new_segment)
 
         all_segments = TripService._insert_segment_ordered(
             trip_data.get("segments", []), new_segment
@@ -525,6 +1025,10 @@ class TripService:
         for key, value in updates.items():
             if key in allowed:
                 target[key] = value
+
+        # Re-enrich if route changed
+        if "origin" in updates or "destination" in updates:
+            TripService._enrich_segment(target)
 
         # Re-sort if journey_type changed (rare but safe to handle)
         derived = TripService._compute_derived_fields(segments)
@@ -589,99 +1093,6 @@ class TripService:
             return False
         updates["updated_at"] = datetime.utcnow()
         trip_ref.update(updates)
-        return True
-
-    @staticmethod
-    def add_manual_segment(
-        user_id: str,
-        trip_id: str,
-        journey_type: str = "outward",
-        origin: Optional[str] = None,
-        destination: Optional[str] = None,
-        departure_date: Optional[str] = None,
-        departure_time: Optional[str] = None,
-        arrival_date: Optional[str] = None,
-        arrival_time: Optional[str] = None,
-        airline_code: Optional[str] = None,
-        flight_number: Optional[str] = None,
-        seat: Optional[str] = None,
-        gate: Optional[str] = None,
-        boarding_time: Optional[str] = None,
-        notes: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Add a manually entered segment to an existing trip."""
-        trip_ref = get_trip_ref(user_id, trip_id)
-        trip_doc = trip_ref.get()
-        if not trip_doc.exists:
-            return None
-
-        trip_data = trip_doc.to_dict()
-        existing_segments = trip_data.get("segments", [])
-        next_num = len(existing_segments) + 1
-
-        new_seg = {
-            "segment_number":        next_num,
-            "journey_type":          journey_type,
-            "origin":                origin,
-            "destination":           destination,
-            "departure_date":        departure_date,
-            "departure_time":        departure_time,
-            "arrival_date":          arrival_date,
-            "arrival_time":          arrival_time,
-            "airline_code":          airline_code,
-            "flight_number":         flight_number,
-            "operating_carrier":     None,
-            "seat":                  seat,
-            "gate":                  gate,
-            "boarding_time":         boarding_time,
-            "boarding_pass_id":      None,
-            "segment_index_in_pass": None,
-            "manually_entered":      True,
-            "notes":                 notes,
-        }
-
-        all_segments = existing_segments + [new_seg]
-        derived = TripService._compute_derived_fields(all_segments)
-
-        trip_ref.update({
-            "segments":   all_segments,
-            "updated_at": datetime.utcnow(),
-            **derived,
-        })
-        return {"segment_number": next_num}
-
-    @staticmethod
-    def update_manual_segment(
-        user_id: str,
-        trip_id: str,
-        segment_number: int,
-        **kwargs
-    ) -> bool:
-        """Update a specific segment within a trip by its segment_number."""
-        trip_ref = get_trip_ref(user_id, trip_id)
-        trip_doc = trip_ref.get()
-        if not trip_doc.exists:
-            return False
-
-        trip_data = trip_doc.to_dict()
-        segments = list(trip_data.get("segments", []))
-
-        updated = False
-        for i, seg in enumerate(segments):
-            if seg.get("segment_number") == segment_number:
-                segments[i] = {**seg, **kwargs}
-                updated = True
-                break
-
-        if not updated:
-            return False
-
-        derived = TripService._compute_derived_fields(segments)
-        trip_ref.update({
-            "segments":   segments,
-            "updated_at": datetime.utcnow(),
-            **derived,
-        })
         return True
 
     @staticmethod
