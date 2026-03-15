@@ -6,6 +6,7 @@ pillow
 google-cloud-vision
 opencv-python-headless
 google-cloud-firestore
+google-cloud-storage
 pydantic
 firebase-admin
 python-dotenv

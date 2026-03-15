@@ -1,10 +1,14 @@
 # main.py
 import os
+from dotenv import load_dotenv
+
+# Load environment variables BEFORE importing modules that read env vars at import time
+load_dotenv()
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from dotenv import load_dotenv
 import traceback
 
 from ocr import extract_text
@@ -12,10 +16,8 @@ from parser import parse_boarding_pass
 from extractors.bcbp_extractor import BCBPParser
 from extractors.llm_extractor import extract_segments_from_image
 from services import TripService
+from services.storage_service import upload_boarding_pass_image, get_signed_url, delete_boarding_pass_images
 from auth import get_current_user, init_firebase
-
-# Load environment variables from .env file
-load_dotenv()
 
 
 def is_dev_mode() -> bool:
@@ -343,6 +345,26 @@ async def process_boarding_pass(
 
         # 2. EXTRACT — OCR (always)
         image_bytes = await file.read()
+
+        # Detect content type and upload image to Cloud Storage
+        content_type = file.content_type or "image/jpeg"
+        if image_bytes[:4] == b'\x89PNG':
+            content_type = "image/png"
+        elif image_bytes[:2] == b'\xff\xd8':
+            content_type = "image/jpeg"
+
+        import uuid as _uuid
+        image_id = f"img_{_uuid.uuid4().hex[:16]}"
+        try:
+            image_path = upload_boarding_pass_image(
+                user_id=user_id,
+                boarding_pass_id=image_id,
+                image_bytes=image_bytes,
+            )
+        except Exception as img_err:
+            print(f"Warning: Image upload failed: {img_err}")
+            image_path = None
+
         raw_text = extract_text(image_bytes)
         ocr_segments = []
         ocr_confidence = 0.0
@@ -423,6 +445,7 @@ async def process_boarding_pass(
             "barcode_parsed": bool(barcode_segments),
             "ocr_parsed": bool(ocr_segments),
             "num_segments": len(merged_segments),
+            "image_path": image_path,
         }
 
         # Derive passenger name / PNR from best source
@@ -780,12 +803,77 @@ async def delete_trip(
     **Authentication Required**: Only allows deleting trips belonging to the authenticated user.
     """
     try:
-        success = TripService.delete_trip(user_id=user_id, trip_id=trip_id)
+        # Get trip data before deleting so we can clean up images
+        trip = TripService.get_trip(user_id=user_id, trip_id=trip_id)
+        if not trip:
+            raise HTTPException(status_code=404, detail="Trip not found")
 
+        # Collect image paths to delete
+        image_paths = []
+        for bp in trip.get("boarding_passes", []):
+            path = bp.get("extraction_metadata", {}).get("image_path")
+            if path:
+                image_paths.append(path)
+
+        success = TripService.delete_trip(user_id=user_id, trip_id=trip_id)
         if not success:
             raise HTTPException(status_code=404, detail="Trip not found")
 
+        # Clean up images from Cloud Storage (best-effort)
+        if image_paths:
+            try:
+                from services.storage_service import _get_bucket
+                bucket = _get_bucket()
+                for path in image_paths:
+                    blob = bucket.blob(path)
+                    if blob.exists():
+                        blob.delete()
+            except Exception as cleanup_err:
+                print(f"Warning: Image cleanup failed: {cleanup_err}")
+
         return {"message": "Trip deleted successfully", "trip_id": trip_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/trips/{trip_id}/boarding-pass-image", tags=["Trips"])
+async def get_boarding_pass_image_url(
+    trip_id: str,
+    user_id: str = Depends(get_current_user),
+    bp_index: int = Query(default=0, description="Index of the boarding pass (0 = first/most recent)"),
+):
+    """
+    Get a signed URL for a boarding pass image.
+
+    Returns a time-limited (15 min) URL the frontend can use to display the image.
+    """
+    try:
+        trip = TripService.get_trip(user_id=user_id, trip_id=trip_id)
+        if not trip:
+            raise HTTPException(status_code=404, detail="Trip not found")
+
+        boarding_passes = trip.get("boarding_passes", [])
+        if bp_index < 0 or bp_index >= len(boarding_passes):
+            raise HTTPException(status_code=404, detail="Boarding pass not found")
+
+        bp = boarding_passes[bp_index]
+        image_path = bp.get("extraction_metadata", {}).get("image_path")
+        if not image_path:
+            raise HTTPException(status_code=404, detail="No image stored for this boarding pass")
+
+        url = get_signed_url(image_path)
+        if not url:
+            raise HTTPException(status_code=404, detail="Image file not found in storage")
+
+        return {
+            "image_url": url,
+            "expires_in_seconds": 900,
+            "boarding_pass_id": bp.get("boarding_pass_id"),
+        }
 
     except HTTPException:
         raise
