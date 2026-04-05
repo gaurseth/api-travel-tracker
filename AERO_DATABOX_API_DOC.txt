@@ -1,0 +1,128 @@
+**AeroDataBox API** is an aviation and flight data API tailored for small and medium businesses, individual developers, researchers, and students. It offers a wide range of data, including flight status, schedules, aircraft information, airport details, statistics, historical data, and more. Designed for seamless integration using REST and web hooks and available through major API marketplaces, it enables users to incorporate aviation information effortlessly into their systems at affordable rates.
+
+----------
+
+> ⚡ ANNOUNCEMENT: FLIGHT ALERTS API BREAKING CHANGES
+> ----------
+> We are moving Flight Alert API (also known as web-hooks subscription / PUSH API) to a new billing model. **If you are using this API, you need to adjust your code before the end of the transition period (April 4, 2026) to prevent service interruption.** Please refer to the following page for the detailed description and migration instructions: https://aerodatabox.com/flight-alert-api-2026/
+
+----------
+
+## Features
+
+### Flights API
+
+🗓️ FIDS & Schedules *(the list of current, future, and historical flights operating in a specific airport)*
+
+Optional extras: real-time position.
+
+🗓️ Flight Status (single day) 
+*(current, future, and historical data about a specific flight operating on a specific or nearest date, found by flight number, ATC call-sign, aircraft registration, or 24-bit ICAO Mode-S address)*
+
+Optional extras: **flight plans** (new, for mainland U.S. airspace flights only); real-time position.
+
+🗓️ Flight History & Schedule (range of dates) *(the list of current, future, and historical flights operating within a specific range of dates, found by flight number, ATC call-sign, aircraft registration, or 24-bit ICAO Mode-S address)*
+
+🗓️ Flight Departure / Arrival Dates *(dates when a flight operates, found by a flight number, ATC call sign, aircraft registration, or 24-bit ICAO Mode-S address)*
+
+🗓️ Search Flight Numbers By Term *(lookup available flight numbers by term - useful for implmenting auto-complete features)*
+
+### Flight Alert API
+🔔 *PUSH API powered by webhooks.  If you are running your own web service, you can subscribe to flights by number or airport code. After that, your HTTP endpoint will be called whenever the flight information gets updated.*
+
+### Aircraft API
+
+✈️ Get aircraft *(aircraft information by aircraft tail number / registration or 24-bit ICAO Mode-S address)*
+
+✈️ Aircraft Registrations *(history of current and all previous registrations of an aircraft found by aircraft tail number / registration or 24-bit ICAO Mode-S address)*
+
+✈️ Airline Fleet [BETA] *- list of active aircraft of an airline*
+
+✈️ Aircraft Photo [BETA] - *aircraft image by tail number (registration)*
+
+✈️ Search Aircraft Tail Numbers By Term *(lookup active aircraft tail numbers by term - useful for implmenting auto-complete features)*
+
+### Airport API
+
+🌎 Get Airport *(airport information retrieved by IATA or ICAO codes, incl. name, location, administrative information, elevation, etc.)*
+
+🌎 Airport Runways *(Information about airport runways: threshold, dimensions, lighting, surface, number, heading, etc. by IATA or ICAO code)*
+
+🌎 Search of Closest Airports by Location *(find airports closest to specified location)*
+
+🌎 Search of Closest Airports by IP Geolocation *(geo-locate specified IP address and find airports closest to this location)*
+
+🌎 Airports Free-text Search *(look up an airport by free text, useful for implementing auto-complete functionality)*
+
+### Industry API
+
+🏭 FAA LADD Aircraft Status.
+*Easy access to the status of the aircraft in the Limiting Aircraft Displayed program of the Federal Aviation Administration of the U.S. Department of Transportation (FAA LADD)*
+
+### Statistical API
+
+📊 Airport & Global Worldwide delays.
+*How many flights are delayed or canceled right now or in the past? Delay statistics and delay index at an airport now and back then.*
+
+📊 Airport Daily Routes Statistics.
+*Where flights are going from this airport and how many flights a day occur in these directions?*
+    
+📊 Flight Delay Statistics.
+*How often is the flight delayed and how much? Detailed statistics grouped by hours and airport of departure/arrival, delay brackets and percentiles*
+
+### Miscellaneous API
+
+🕝 Local Time at the Airport
+*Get local time by specifying just an IATA or ICAO code of the airport*
+
+🌅 Solar and Day Time at the Airport.
+*Calculation of sunset, sunrise, civil, nautical and astronomical dusk / dawn times, golden and blue hours, sun elevation and azimuth.*
+
+🌎 Distance between airports.
+*Calculate the great-circle distance between airports*
+
+⏱️ Flight Time between Airports.
+*Calculate theoretical and realistic (machine-learning based) flight time between specified airports*
+
+🌎 List of all countries
+
+## API Supported Response Formats
+* JSON (default, `Accept: application/json`)
+* XML (`Accept: application/xml`)
+
+
+## Must-Reads
+
+* [Pricing](https://aerodatabox.com/pricing)  (API calls are not priced equally)
+* [Documentation & OpenAPI Specification](https://doc.aerodatabox.com/ )
+* [Data Coverage Limitations](https://aerodatabox.com/data-coverage)
+* [FAQ](https://aerodatabox.com/faq)
+* [Terms of Use](https://aerodatabox.com/terms) &lt;- **BY SUBSCRIBING TO THE API YOU AUTOMATICALLY ACCEPT THESE TERMS**
+
+## Subscribe to Updates
+
+Subscribe to our newsletter to follow updates and news about (breaking) changes: click "JOIN NEWSLETTER" at the top-right corner of our  [web-site](https://aerodatabox.com). Recent updates can be found on the [News & Updates](https://aerodatabox.com/news) page
+
+## Flight Search Portal - Explore Our Data
+https://portal.aerodatabox.com
+
+## Other Interesting Reads
+* [Machine Learning-Based Realistic Flight Time Calculation](https://aerodatabox.com/ml-flight-time/)
+* [Airport Delays](https://aerodatabox.com/api-airport-delays/)
+* [Runway detection](https://aerodatabox.com/flight-take-off-and-landing-time-runway-detection-based-on-ads-b-data-more-flights-and-status-updates/)
+* [FAA LADD](https://aerodatabox.com/faa-ladd)
+
+## Support
+
+https://aerodatabox.com/contact
+
+## API Availability
+Last 7 days
+
+![](https://app.statuscake.com/button/index.php?Track=1iySKWJj1E&amp;Days=7&amp;Design=2)
+
+Last 30 days
+
+![](https://app.statuscake.com/button/index.php?Track=1iySKWJj1E&amp;Days=30&amp;Design=2)
+
+[Uptime Status](https://status.aerodatabox.com)

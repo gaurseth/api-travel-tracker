@@ -1,8 +1,11 @@
 """
 Confidence aggregation for overall boarding pass extraction quality.
 """
+import logging
 from typing import List, Tuple
 from models.boarding_pass import BoardingPass
+
+logger = logging.getLogger("boarding_pass.confidence")
 from models.common import Warning
 
 
@@ -179,6 +182,36 @@ def compute_overall_confidence(boarding_pass: BoardingPass) -> Tuple[float, List
 
     # Weighted sum
     overall_confidence = sum(score * weight for score, weight in zip(scores, normalized_weights))
+
+    # Log confidence breakdown
+    field_names = []
+    if boarding_pass.passenger and boarding_pass.passenger.full_name:
+        field_names.append("passenger_name")
+    if boarding_pass.segments:
+        seg0 = boarding_pass.segments[0]
+        if seg0.flight and seg0.flight.flight_number:
+            field_names.append("flight_number")
+        if seg0.schedule and seg0.schedule.departure_date:
+            field_names.append("date")
+        if seg0.route and seg0.route.origin and seg0.route.destination:
+            field_names.append("route")
+        if seg0.boarding:
+            if seg0.boarding.seat:
+                field_names.append("seat")
+            if seg0.boarding.gate:
+                field_names.append("gate")
+            if seg0.boarding.time:
+                field_names.append("boarding_time")
+    if boarding_pass.pnr:
+        field_names.append("pnr")
+
+    logger.info("--- CONFIDENCE BREAKDOWN ---")
+    for i, (score, weight, nw) in enumerate(zip(scores, weights, normalized_weights)):
+        name = field_names[i] if i < len(field_names) else f"field_{i}"
+        logger.info("  %-16s  score=%.2f  weight=%.2f  normalized=%.2f  contribution=%.3f",
+                     name, score, weight, nw, score * nw)
+    logger.info("  OVERALL = %.2f  (from %d fields, total_weight=%.2f)", overall_confidence, len(scores), total_weight)
+    logger.info("--- END CONFIDENCE ---")
 
     return round(overall_confidence, 2), warnings
 

@@ -16,6 +16,7 @@ String layout:
 """
 from typing import Optional, Dict, Tuple
 from datetime import datetime, timedelta
+from extractors.passenger_name import strip_title
 
 
 class BCBPParser:
@@ -48,12 +49,13 @@ class BCBPParser:
             # ------------------------------------------------------------------
             # Shared header  (offsets 0–21)
             # ------------------------------------------------------------------
-            passenger_name = bcbp_string[2:22].strip()
+            passenger_name_raw = bcbp_string[2:22].strip()
             passenger_last = passenger_first = None
-            if '/' in passenger_name:
-                parts = passenger_name.split('/', 1)
-                passenger_last  = parts[0].strip()
-                passenger_first = parts[1].strip()
+            if '/' in passenger_name_raw:
+                parts = passenger_name_raw.split('/', 1)
+                passenger_last, _  = strip_title(parts[0].strip())
+                passenger_first, _ = strip_title(parts[1].strip())
+            passenger_name = f"{passenger_last}/{passenger_first}" if passenger_last else passenger_name_raw
 
             # ------------------------------------------------------------------
             # Segment 1 mandatory  (offsets 22–59)

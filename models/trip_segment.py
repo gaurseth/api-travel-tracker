@@ -66,11 +66,16 @@ class TripSegment(BaseModel):
 
     # Passenger
     passenger_name: Optional[str] = Field(None, description="Passenger name for this segment")
+    passenger_id: Optional[str] = Field(None, description="References passenger in users/{userId}/passengers/{passengerId}")
 
     # Computed flight info
     distance_miles: Optional[float] = Field(None, description="Estimated flight distance in miles")
     travel_duration_minutes: Optional[int] = Field(None, description="Estimated travel time in minutes")
     segment_type: Optional[str] = Field(None, description="'international' or 'domestic' based on origin/destination countries")
+
+    # Timezone info (from Aviationstack API enrichment)
+    departure_timezone: Optional[str] = Field(None, description="IANA timezone, e.g. 'America/New_York'")
+    arrival_timezone: Optional[str] = Field(None, description="IANA timezone, e.g. 'Europe/London'")
 
     # Metadata
     manually_entered: bool = Field(

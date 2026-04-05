@@ -10,7 +10,18 @@ from google.cloud import firestore
 from models.boarding_pass import BoardingPass
 from models.common import Warning
 from database import get_user_trips_collection, get_trip_ref
+import os
 from services.flight_helpers import estimate_flight_distance, get_trip_type, estimate_travel_time
+from services.aviationstack_service import lookup_flight_schedule as aviationstack_lookup
+from services.aerodatabox_service import lookup_flight_schedule as aerodatabox_lookup
+
+
+def _get_flight_lookup_fn():
+    """Return the active flight schedule lookup function based on FLIGHT_API env var."""
+    api = os.getenv("FLIGHT_API", "aviationstack").lower()
+    if api == "aerodatabox":
+        return aerodatabox_lookup, "AeroDataBox"
+    return aviationstack_lookup, "Aviationstack"
 
 
 # Keys present in every flat segment dict produced by conversion helpers
@@ -18,6 +29,7 @@ _SEGMENT_KEYS = (
     "origin", "destination", "airline_code", "flight_number",
     "departure_date", "departure_time", "arrival_date", "arrival_time",
     "seat", "gate", "boarding_time", "pnr", "cabin_class", "passenger_name",
+    "passenger_id",
 )
 
 
@@ -77,7 +89,7 @@ class TripService:
 
     @staticmethod
     def _enrich_segment(seg: Dict[str, Any]) -> Dict[str, Any]:
-        """Compute distance_miles, travel_duration_minutes, segment_type from origin/destination."""
+        """Compute distance, duration, type from origin/destination. Look up flight schedule if times missing."""
         origin = seg.get("origin")
         dest = seg.get("destination")
         if origin and dest:
@@ -88,6 +100,42 @@ class TripService:
             seg["distance_miles"] = None
             seg["travel_duration_minutes"] = None
             seg["segment_type"] = None
+
+        # Aviationstack enrichment — fill missing times from real flight schedules
+        has_times = seg.get("departure_time") and seg.get("arrival_time")
+        has_flight_info = seg.get("airline_code") and seg.get("flight_number")
+        print(f"[Enrich] Segment: {seg.get('origin')}->{seg.get('destination')} "
+              f"airline={seg.get('airline_code')} flight={seg.get('flight_number')} "
+              f"dep_time={seg.get('departure_time')} arr_time={seg.get('arrival_time')} "
+              f"has_times={has_times} has_flight_info={has_flight_info}")
+
+        if not has_times and has_flight_info:
+            lookup_fn, api_name = _get_flight_lookup_fn()
+            print(f"[Enrich] Times missing + flight info present — calling {api_name}")
+            schedule = lookup_fn(
+                airline_code=seg["airline_code"],
+                flight_number=seg["flight_number"],
+                origin=seg.get("origin"),
+                destination=seg.get("destination"),
+                departure_date=seg.get("departure_date"),
+            )
+            if schedule:
+                print(f"[Enrich] Got schedule from {api_name}: {schedule}")
+                if not seg.get("departure_time"):
+                    seg["departure_time"] = schedule.get("departure_time")
+                if not seg.get("arrival_time"):
+                    seg["arrival_time"] = schedule.get("arrival_time")
+                if not seg.get("arrival_date"):
+                    seg["arrival_date"] = schedule.get("arrival_date")
+                seg["departure_timezone"] = schedule.get("departure_timezone")
+                seg["arrival_timezone"] = schedule.get("arrival_timezone")
+            else:
+                print(f"[Enrich] {api_name} returned None — no time enrichment")
+        elif has_times:
+            print("[Enrich] Times already present — skipping flight API")
+        elif not has_flight_info:
+            print("[Enrich] No airline_code/flight_number — skipping flight API")
+
         return seg
 
     @staticmethod
@@ -558,6 +606,7 @@ class TripService:
         segments: List[Dict[str, Any]],
         journey_type: str = "outward",
         passenger_name: Optional[str] = None,
+        passenger_id: Optional[str] = None,
         extraction_metadata: Optional[Dict[str, Any]] = None,
         raw_text: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -582,6 +631,9 @@ class TripService:
                 "manually_entered":      False,
                 "notes":                 None,
             }
+            # Propagate passenger_id to all segments
+            if passenger_id:
+                trip_seg["passenger_id"] = passenger_id
             TripService._enrich_segment(trip_seg)
             trip_segments.append(trip_seg)
 
@@ -590,8 +642,15 @@ class TripService:
         if not passenger_name:
             passenger_name = segments[0].get("passenger_name") if segments else None
 
+        # Build normalized name for boarding pass attachment
+        raw_pax_name = passenger_name or ""
+        normalized_pax = None  # normalization is client-controlled
+
         bp_attachment = {
             "boarding_pass_id":    boarding_pass_id,
+            "passenger_id":        passenger_id,
+            "raw_passenger_name":  raw_pax_name or None,
+            "normalized_name":     normalized_pax,
             "boarding_pass_data":  {},
             "segment_count":       len(segments),
             "attached_at":         created_at.isoformat(),
@@ -632,6 +691,8 @@ class TripService:
         trip_id: str,
         segments: List[Dict[str, Any]],
         journey_type: str = "outward",
+        passenger_id: Optional[str] = None,
+        passenger_name: Optional[str] = None,
         extraction_metadata: Optional[Dict[str, Any]] = None,
         raw_text: Optional[str] = None,
     ) -> bool:
@@ -660,11 +721,19 @@ class TripService:
                 "manually_entered":      False,
                 "notes":                 None,
             }
+            if passenger_id:
+                new_seg["passenger_id"] = passenger_id
             TripService._enrich_segment(new_seg)
             all_segments = TripService._insert_segment_ordered(all_segments, new_seg)
 
+        raw_pax_name = passenger_name or (segments[0].get("passenger_name") if segments else None)
+        normalized_pax = None  # normalization is client-controlled
+
         bp_attachment = {
             "boarding_pass_id":    boarding_pass_id,
+            "passenger_id":        passenger_id,
+            "raw_passenger_name":  raw_pax_name,
+            "normalized_name":     normalized_pax,
             "boarding_pass_data":  {},
             "segment_count":       len(segments),
             "attached_at":         current_time.isoformat(),
@@ -785,6 +854,7 @@ class TripService:
         airline_code: Optional[str] = None,
         flight_number: Optional[str] = None,
         passenger_name: Optional[str] = None,
+        passenger_id: Optional[str] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
         notes: Optional[str] = None,
@@ -811,6 +881,7 @@ class TripService:
             "boarding_time":         None,
             "boarding_pass_id":      None,
             "segment_index_in_pass": None,
+            "passenger_id":          passenger_id,
             "manually_entered":      True,
             "notes":                 None,
         }
@@ -1013,7 +1084,7 @@ class TripService:
 
         # Find the target segment
         target = next((s for s in segments if s.get("segment_number") == segment_number), None)
-        if target is None or not target.get("manually_entered"):
+        if target is None:
             return False
 
         # Apply updates to the segment in-place
@@ -1021,6 +1092,7 @@ class TripService:
             "journey_type", "origin", "destination",
             "departure_date", "departure_time", "arrival_date", "arrival_time",
             "airline_code", "flight_number", "seat", "gate", "boarding_time", "notes",
+            "passenger_id",
         }
         for key, value in updates.items():
             if key in allowed:
@@ -1146,3 +1218,4 @@ class TripService:
                 for t in trips if t.get("origin") and t.get("destination")
             }),
         }
+

@@ -1,5 +1,6 @@
 # main.py
 import os
+import logging
 from dotenv import load_dotenv
 
 # Load environment variables BEFORE importing modules that read env vars at import time
@@ -10,13 +11,24 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import traceback
+import json
+
+logger = logging.getLogger("boarding_pass")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+# DEBUG only for our own loggers — keeps anthropic/httpx from dumping full base64 payloads
+logging.getLogger("boarding_pass").setLevel(logging.DEBUG)
 
 from ocr import extract_text
 from parser import parse_boarding_pass
 from extractors.bcbp_extractor import BCBPParser
 from extractors.llm_extractor import extract_segments_from_image
 from services import TripService
-from services.storage_service import upload_boarding_pass_image, get_signed_url, delete_boarding_pass_images
+from services.passenger_service import PassengerService  # upsert-by-ID only
+from services.storage_service import upload_boarding_pass_image, get_signed_url, delete_boarding_pass_images, compress_image
 from auth import get_current_user, init_firebase
 
 
@@ -101,10 +113,26 @@ class CreateManualTripRequest(BaseModel):
     airline_code: Optional[str] = None
     flight_number: Optional[str] = None
     passenger_name: Optional[str] = None
+    passenger_id: Optional[str] = None
     title: Optional[str] = None
     description: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
+
+
+class UpsertPassengerRequest(BaseModel):
+    """Request model for upserting a passenger. ID must be client-generated."""
+    id: Optional[str] = Field(None, description="Client-generated passenger ID (optional, URL path takes precedence)")
+    name: str = Field(description="Passenger display name")
+    normalized_name: Optional[str] = Field(None, description="Lowercase normalized name")
+    is_primary: bool = Field(default=False, description="True if this is the account holder")
+    updated_at: Optional[str] = Field(None, description="ISO-8601 datetime from client")
+
+
+class UpdatePassengerRequest(BaseModel):
+    """Request model for updating a passenger."""
+    name: Optional[str] = None
+    is_primary: Optional[bool] = None
 
 
 class BoardingPassBarcodeRequest(BaseModel):
@@ -145,6 +173,7 @@ class SegmentInput(BaseModel):
     seat: Optional[str] = None
     gate: Optional[str] = None
     boarding_time: Optional[str] = None
+    passenger_id: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -366,6 +395,10 @@ async def process_boarding_pass(
             image_path = None
 
         raw_text = extract_text(image_bytes)
+        logger.debug("=" * 60)
+        logger.debug("RAW OCR TEXT (%d chars):\n%s", len(raw_text), raw_text[:3000])
+        logger.debug("=" * 60)
+
         ocr_segments = []
         ocr_confidence = 0.0
         ocr_quality = "none"
@@ -374,8 +407,48 @@ async def process_boarding_pass(
         try:
             boarding_pass, ocr_confidence, ocr_warnings, ocr_quality = parse_boarding_pass(raw_text)
             ocr_segments = TripService.boarding_pass_to_segment_dicts(boarding_pass)
+
+            # Log OCR per-field extraction details
+            logger.info("--- OCR EXTRACTION RESULTS ---")
+            logger.info("  confidence=%.2f  quality=%s", ocr_confidence, ocr_quality)
+            bp = boarding_pass
+            if bp.passenger and bp.passenger.full_name:
+                logger.info("  passenger: %r (conf=%.2f)", bp.passenger.full_name.value, bp.passenger.full_name.confidence)
+            else:
+                logger.info("  passenger: NOT FOUND")
+            for i, seg in enumerate(bp.segments):
+                logger.info("  segment[%d]:", i)
+                if seg.flight and seg.flight.flight_number:
+                    logger.info("    flight: %s%s (conf=%.2f)",
+                                seg.flight.airline_code.value if seg.flight.airline_code else "??",
+                                seg.flight.flight_number.value or "?",
+                                seg.flight.flight_number.confidence)
+                if seg.route:
+                    o = seg.route.origin.iata if seg.route.origin else None
+                    d = seg.route.destination.iata if seg.route.destination else None
+                    logger.info("    route: %s -> %s (conf=%.2f/%.2f)",
+                                o.value if o else "?", d.value if d else "?",
+                                o.confidence if o else 0, d.confidence if d else 0)
+                if seg.schedule:
+                    logger.info("    dep_date=%s  dep_time=%s  arr_date=%s  arr_time=%s",
+                                seg.schedule.departure_date.value if seg.schedule.departure_date else None,
+                                seg.schedule.departure_time.value if seg.schedule.departure_time else None,
+                                seg.schedule.arrival_date.value if seg.schedule.arrival_date else None,
+                                seg.schedule.arrival_time.value if seg.schedule.arrival_time else None)
+                if seg.boarding:
+                    logger.info("    seat=%s  gate=%s  boarding_time=%s",
+                                seg.boarding.seat.value if seg.boarding.seat else None,
+                                seg.boarding.gate.value if seg.boarding.gate else None,
+                                seg.boarding.time.value if seg.boarding.time else None)
+            if bp.pnr:
+                logger.info("  pnr: %s (conf=%.2f)", bp.pnr.value, bp.pnr.confidence)
+            if ocr_warnings:
+                for w in ocr_warnings:
+                    logger.info("  warning: %s — %s (conf=%.2f)", w.field, w.reason, w.confidence)
+            logger.info("  OCR segments output: %s", json.dumps(ocr_segments, indent=2, default=str))
+            logger.info("--- END OCR ---")
         except Exception as ocr_err:
-            print(f"Warning: OCR parse failed: {ocr_err}")
+            logger.error("OCR parse failed: %s", ocr_err, exc_info=True)
 
         # 2b. LLM FALLBACK — when OCR confidence is low
         llm_fallback_enabled = os.getenv("LLM_FALLBACK_ENABLED", "false").lower() == "true"
@@ -383,9 +456,9 @@ async def process_boarding_pass(
         used_llm = False
 
         if llm_fallback_enabled and ocr_confidence < llm_threshold:
-            print(f"OCR confidence {ocr_confidence:.2f} < {llm_threshold}, triggering LLM fallback...")
+            logger.info("--- LLM FALLBACK TRIGGERED ---")
+            logger.info("  reason: OCR confidence %.2f < threshold %.2f", ocr_confidence, llm_threshold)
             try:
-                # Build barcode context to guide the LLM
                 barcode_context = None
                 if bcbp_data:
                     barcode_context = {
@@ -394,25 +467,38 @@ async def process_boarding_pass(
                         "pnr": bcbp_data.get("pnr"),
                         "segments": barcode_segments,
                     }
+                    logger.info("  barcode context provided: %s", json.dumps(barcode_context, indent=2, default=str))
+
+                compressed_bytes = compress_image(image_bytes)
+                logger.info("  Image compressed for LLM: %d -> %d bytes (%.0f%% reduction)",
+                            len(image_bytes), len(compressed_bytes),
+                            (1 - len(compressed_bytes) / len(image_bytes)) * 100)
 
                 llm_segments, llm_confidence = extract_segments_from_image(
-                    image_bytes=image_bytes,
+                    image_bytes=compressed_bytes,
                     raw_ocr_text=raw_text,
                     barcode_context=barcode_context,
                 )
 
+                logger.info("  LLM returned %d segment(s), confidence=%.2f",
+                            len(llm_segments) if llm_segments else 0, llm_confidence)
                 if llm_segments:
+                    logger.info("  LLM segments output: %s", json.dumps(llm_segments, indent=2, default=str))
                     ocr_segments = llm_segments
                     ocr_confidence = llm_confidence
                     ocr_quality = "good"
                     ocr_warnings = []
                     used_llm = True
-                    print(f"LLM fallback succeeded: {len(llm_segments)} segment(s), confidence {llm_confidence:.2f}")
                 else:
-                    print("LLM fallback returned no segments, keeping original OCR result")
+                    logger.warning("  LLM returned no segments — keeping original OCR result")
 
             except Exception as llm_err:
-                print(f"LLM fallback failed: {llm_err}, keeping original OCR result")
+                logger.error("  LLM fallback failed: %s", llm_err, exc_info=True)
+            logger.info("--- END LLM FALLBACK ---")
+        elif llm_fallback_enabled:
+            logger.info("LLM fallback skipped: OCR confidence %.2f >= threshold %.2f", ocr_confidence, llm_threshold)
+        else:
+            logger.info("LLM fallback disabled (LLM_FALLBACK_ENABLED=%s)", os.getenv("LLM_FALLBACK_ENABLED", "false"))
 
         # If both sources failed, return error
         if not barcode_segments and not ocr_segments:
@@ -423,6 +509,15 @@ async def process_boarding_pass(
 
         # 3. MERGE — barcode fields take priority, with guardrails
         merged_segments, merge_warnings = TripService._merge_segments(barcode_segments, ocr_segments)
+
+        logger.info("--- MERGE RESULTS ---")
+        logger.info("  barcode segments: %d, ocr/llm segments: %d → merged: %d",
+                     len(barcode_segments), len(ocr_segments), len(merged_segments))
+        if merge_warnings:
+            for mw in merge_warnings:
+                logger.info("  merge warning: %s", mw)
+        logger.info("  merged output: %s", json.dumps(merged_segments, indent=2, default=str))
+        logger.info("--- END MERGE ---")
 
         # Combine OCR parser warnings + merge guardrail warnings
         all_warnings = ([w.model_dump() for w in ocr_warnings] if ocr_warnings else []) + merge_warnings
@@ -459,6 +554,9 @@ async def process_boarding_pass(
         if not pnr and merged_segments:
             pnr = merged_segments[0].get("pnr")
 
+        # passenger_id is client-controlled — not resolved server-side
+        passenger_id = None
+
         # 4. MATCH — find existing trip
         match_result = TripService.find_matching_trip(user_id, merged_segments)
 
@@ -469,6 +567,8 @@ async def process_boarding_pass(
                 trip_id=match_result["trip_id"],
                 segments=merged_segments,
                 journey_type=journey_type,
+                passenger_id=passenger_id,
+                passenger_name=passenger_name,
                 extraction_metadata=extraction_metadata,
                 raw_text=bcbp_string or raw_text,
             )
@@ -483,6 +583,7 @@ async def process_boarding_pass(
                 "match_score": match_result["score"],
                 "segments": merged_segments,
                 "passenger_name": passenger_name,
+                "passenger_id": passenger_id,
                 "pnr": pnr,
                 "extraction_metadata": extraction_metadata,
             }
@@ -493,6 +594,7 @@ async def process_boarding_pass(
                 segments=merged_segments,
                 journey_type=journey_type,
                 passenger_name=passenger_name,
+                passenger_id=passenger_id,
                 extraction_metadata=extraction_metadata,
                 raw_text=bcbp_string or raw_text,
             )
@@ -502,6 +604,7 @@ async def process_boarding_pass(
                 "match_score": None,
                 "segments": merged_segments,
                 "passenger_name": passenger_name,
+                "passenger_id": passenger_id,
                 "pnr": pnr,
                 "extraction_metadata": extraction_metadata,
             }
@@ -538,6 +641,10 @@ async def attach_barcode_to_trip(
 
         segments = TripService.bcbp_data_to_segment_dicts(bcbp_data)
 
+        # passenger_id is client-controlled — not resolved server-side
+        passenger_name = bcbp_data.get("passenger_name")
+        passenger_id = None
+
         extraction_metadata = {
             "overall_confidence": 0.98,
             "quality": "excellent",
@@ -550,6 +657,8 @@ async def attach_barcode_to_trip(
             trip_id=trip_id,
             segments=segments,
             journey_type=request.journey_type,
+            passenger_id=passenger_id,
+            passenger_name=passenger_name,
             extraction_metadata=extraction_metadata,
             raw_text=request.bcbp_string,
         )
@@ -600,6 +709,7 @@ async def create_manual_trip(
             airline_code=request.airline_code,
             flight_number=request.flight_number,
             passenger_name=request.passenger_name,
+            passenger_id=request.passenger_id,
             title=request.title,
             description=request.description,
             notes=request.notes,
@@ -623,7 +733,7 @@ async def list_trips(
     limit: int = Query(default=50, ge=1, le=100, description="Maximum results"),
     offset: int = Query(default=0, ge=0, description="Results offset"),
     order_by: str = Query(default="created_at", description="Field to order by"),
-    order_direction: str = Query(default="desc", regex="^(asc|desc)$")
+    order_direction: str = Query(default="desc", pattern="^(asc|desc)$")
 ):
     """
     List all trips for the authenticated user with pagination.
@@ -1009,3 +1119,118 @@ async def update_segment(
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# Passenger Endpoints (Protected)
+# ============================================
+
+@app.post("/passengers/{passenger_id}", status_code=200, tags=["Passengers"])
+async def upsert_passenger(
+    passenger_id: str,
+    request: UpsertPassengerRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Upsert a passenger using a client-generated ID from the URL path.
+
+    - If passenger exists: merge/update fields
+    - If passenger does not exist: create with provided ID
+
+    **Authentication Required**: Passenger is stored under the authenticated user.
+    **Important**: The `passenger_id` in the URL is the source of truth for the ID.
+    """
+    try:
+        data = request.model_dump(exclude_none=True)
+        data["id"] = passenger_id
+        result = PassengerService.upsert_passenger(
+            user_id=user_id,
+            passenger_data=data,
+        )
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/passengers", tags=["Passengers"])
+async def list_passengers(
+    user_id: str = Depends(get_current_user),
+):
+    """
+    List all active passengers for the authenticated user.
+
+    **Authentication Required**: Only returns passengers belonging to the authenticated user.
+    """
+    try:
+        passengers = PassengerService.list_passengers(user_id)
+        return {"passengers": passengers, "count": len(passengers)}
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/passengers/{passenger_id}", tags=["Passengers"])
+async def update_passenger(
+    passenger_id: str,
+    request: UpdatePassengerRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Update a passenger's name or primary status.
+
+    **Authentication Required**: Only allows updating passengers belonging to the authenticated user.
+    """
+    try:
+        updates = {k: v for k, v in request.model_dump().items() if v is not None}
+        if not updates:
+            raise HTTPException(status_code=400, detail="No updates provided")
+
+        success = PassengerService.update_passenger(
+            user_id=user_id,
+            passenger_id=passenger_id,
+            updates=updates,
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Passenger not found")
+
+        return {"message": "Passenger updated successfully", "passenger_id": passenger_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/passengers/{passenger_id}", tags=["Passengers"])
+async def delete_passenger(
+    passenger_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Soft-delete a passenger.
+
+    **Authentication Required**: Only allows deleting passengers belonging to the authenticated user.
+    """
+    try:
+        success = PassengerService.delete_passenger(
+            user_id=user_id,
+            passenger_id=passenger_id,
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Passenger not found")
+
+        return {"message": "Passenger deleted successfully", "passenger_id": passenger_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+

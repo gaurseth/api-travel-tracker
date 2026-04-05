@@ -23,6 +23,19 @@ class BoardingPassAttachment(BaseModel):
     """
     boarding_pass_id: str = Field(description="Unique identifier for this boarding pass")
 
+    passenger_id: Optional[str] = Field(
+        None,
+        description="References passenger in users/{userId}/passengers/{passengerId}"
+    )
+    raw_passenger_name: Optional[str] = Field(
+        None,
+        description="Raw passenger name as extracted from the boarding pass"
+    )
+    normalized_name: Optional[str] = Field(
+        None,
+        description="Normalized version of raw_passenger_name for matching"
+    )
+
     boarding_pass_data: Dict[str, Any] = Field(
         description="Complete BoardingPass object as JSON (includes all segments, passenger info, etc.)"
     )

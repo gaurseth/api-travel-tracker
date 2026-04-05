@@ -7,15 +7,19 @@ Fallback for when OCR confidence is low. Sends the boarding pass image
 import os
 import json
 import base64
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 
 import anthropic
+from extractors.passenger_name import strip_title
+
+logger = logging.getLogger("boarding_pass.llm")
 
 
 # The exact JSON schema the LLM must return — matches _SEGMENT_KEYS in trip_service.py
 _SEGMENT_SCHEMA = {
     "origin": "3-letter IATA airport code for departure airport (e.g. 'FRA', 'JFK')",
-    "destination": "3-letter IATA airport code for arrival airport (e.g. 'IAH', 'LHR')",
+    "destination": "3-letter IATA airport code for arrival airport (e.g. 'IAH', 'LHR') or the full city name if that's all that's visible (e.g. 'Delhi')",
     "airline_code": "2-3 character airline code (e.g. 'LH', 'UA', '6E')",
     "flight_number": "Flight number digits only, no airline prefix (e.g. '0047', '2590')",
     "departure_date": "Departure date in ISO format YYYY-MM-DD (e.g. '2026-05-03')",
@@ -63,6 +67,7 @@ def _build_system_prompt() -> str:
         f"{_SCHEMA_JSON}\n\n"
         "Rules:\n"
         "- IATA codes must be exactly 3 uppercase letters\n"
+        "- If the origin or destination airport is a full city name like Delhi or New Delhi, convert that to its correct IATA code (DEL)\n"
         "- Dates must be ISO format: YYYY-MM-DD\n"
         "- Times must be 24h format: HH:MM\n"
         "- Flight number should be digits only (no airline prefix)\n"
@@ -181,10 +186,13 @@ def extract_segments_from_image(
         if block.type == "text":
             raw_response += block.text
 
+    logger.debug("LLM raw response (%d chars):\n%s", len(raw_response), raw_response[:2000])
+    logger.info("LLM API usage: input_tokens=%s output_tokens=%s model=%s",
+                message.usage.input_tokens, message.usage.output_tokens, message.model)
+
     # Parse JSON — strip any markdown fences the LLM may have added
     cleaned = raw_response.strip()
     if cleaned.startswith("```"):
-        # Remove ```json ... ``` wrapper
         lines = cleaned.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
@@ -192,12 +200,12 @@ def extract_segments_from_image(
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        print(f"LLM extractor: failed to parse JSON response: {raw_response[:500]}")
+        logger.error("LLM extractor: failed to parse JSON:\n%s", raw_response[:1000])
         return [], 0.0
 
     raw_segments = data.get("segments", [])
     if not isinstance(raw_segments, list) or not raw_segments:
-        print(f"LLM extractor: no segments in response")
+        logger.warning("LLM extractor: no segments in parsed response: %s", json.dumps(data, indent=2)[:500])
         return [], 0.0
 
     # Normalise into the standard flat dict shape
@@ -207,16 +215,62 @@ def extract_segments_from_image(
         "seat", "gate", "boarding_time", "pnr", "cabin_class", "passenger_name",
     )
 
+    # Alias map: LLM may return slightly different key names
+    _ALIASES = {
+        "origin_iata": "origin",
+        "departure_airport": "origin",
+        "from": "origin",
+        "destination_iata": "destination",
+        "arrival_airport": "destination",
+        "to": "destination",
+        "airline_iata": "airline_code",
+        "airline": "airline_code",
+        "carrier": "airline_code",
+        "booking_class": "cabin_class",
+        "class": "cabin_class",
+        "travel_class": "cabin_class",
+        "boarding_group": "boarding_time",
+        "record_locator": "pnr",
+        "booking_reference": "pnr",
+        "confirmation_code": "pnr",
+        "dep_date": "departure_date",
+        "dep_time": "departure_time",
+        "arr_date": "arrival_date",
+        "arr_time": "arrival_time",
+        "name": "passenger_name",
+        "pax_name": "passenger_name",
+    }
+
     segments = []
     for raw_seg in raw_segments:
+        # Remap aliased keys to canonical keys
+        normalized_seg = {}
+        for raw_key, val in raw_seg.items():
+            canonical = _ALIASES.get(raw_key, raw_key)
+            # Don't overwrite if canonical key already has a value
+            if canonical not in normalized_seg or normalized_seg[canonical] is None:
+                normalized_seg[canonical] = val
+
         seg = {}
         for key in _KEYS:
-            val = raw_seg.get(key)
+            val = normalized_seg.get(key)
             # Normalise "null" string to None
             if val is None or (isinstance(val, str) and val.strip().lower() in ("null", "")):
                 seg[key] = None
             else:
                 seg[key] = str(val).strip() if isinstance(val, str) else val
+        # Clean title from passenger_name if present (e.g. "SETH/GAURAV MR" -> "SETH/GAURAV")
+        pax = seg.get("passenger_name")
+        if pax and isinstance(pax, str):
+            if "/" in pax:
+                parts = pax.split("/", 1)
+                clean_last, _ = strip_title(parts[0].strip())
+                clean_first, _ = strip_title(parts[1].strip())
+                seg["passenger_name"] = f"{clean_last}/{clean_first}"
+            else:
+                cleaned, _ = strip_title(pax.strip())
+                seg["passenger_name"] = cleaned
+
         segments.append(seg)
 
     # Confidence: if we got valid segments, assign 0.85

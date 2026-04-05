@@ -95,7 +95,7 @@ def _auto_crop(img: Image.Image) -> Image.Image:
     return img.crop((x1, y1, x2, y2))
 
 
-def _compress_image(image_bytes: bytes) -> bytes:
+def compress_image(image_bytes: bytes) -> bytes:
     """
     Auto-crop background, resize, and compress to JPEG.
     """
@@ -130,7 +130,7 @@ def upload_boarding_pass_image(
 
     Returns the GCS object path (not a URL).
     """
-    compressed = _compress_image(image_bytes)
+    compressed = compress_image(image_bytes)
     blob_path = f"boarding-passes/{user_id}/{boarding_pass_id}.jpg"
 
     bucket = _get_bucket()
