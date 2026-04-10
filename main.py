@@ -29,6 +29,7 @@ from extractors.llm_extractor import extract_segments_from_image
 from services import TripService
 from services.passenger_service import PassengerService  # upsert-by-ID only
 from services.storage_service import upload_boarding_pass_image, get_signed_url, delete_boarding_pass_images, compress_image
+from services.aerodatabox_service import search_flight
 from auth import get_current_user, init_firebase
 
 
@@ -1232,5 +1233,29 @@ async def delete_passenger(
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# Flight Search Endpoints (Protected)
+# ============================================
+
+@app.get("/flights/search", tags=["Flights"])
+async def flight_search(
+    flight_number: str = Query(description="Flight number e.g. 'UA46', 'EK202'"),
+    date: str = Query(description="Departure date in YYYY-MM-DD format"),
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Search for a flight by number and departure date.
+
+    Returns flight details including origin, destination, times, and aircraft info.
+    Uses the AeroDataBox API.
+
+    **Authentication Required**.
+    """
+    result = search_flight(flight_number=flight_number, departure_date=date)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Flight {flight_number} not found for {date}")
+    return result
 
 
