@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "passengers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "normalized_name", "order": "ASCENDING" },
+        { "fieldPath": "deleted_at", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

@@ -1133,13 +1133,20 @@ async def upsert_passenger(
     user_id: str = Depends(get_current_user),
 ):
     """
-    Upsert a passenger using a client-generated ID from the URL path.
+    Upsert a passenger with resolve-by-normalized_name semantics.
 
-    - If passenger exists: merge/update fields
-    - If passenger does not exist: create with provided ID
+    Dedup rule: the first write for a given (user_id, normalized_name) wins.
+    A later write with a DIFFERENT client id but the same normalized_name is
+    redirected to the canonical id — the client should adopt the returned
+    `id` as authoritative.
+
+    Response shape:
+        { "id": "<canonical id>",
+          "canonical": true | false,
+          "merged_from": "<original client id>"  # only when canonical=true
+          "passenger": { ...full doc... } }
 
     **Authentication Required**: Passenger is stored under the authenticated user.
-    **Important**: The `passenger_id` in the URL is the source of truth for the ID.
     """
     try:
         data = request.model_dump(exclude_none=True)
