@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load environment variables BEFORE importing modules that read env vars at import time
 load_dotenv()
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -30,6 +30,7 @@ from services import TripService
 from services.passenger_service import PassengerService  # upsert-by-ID only
 from services.storage_service import upload_boarding_pass_image, get_signed_url, delete_boarding_pass_images, compress_image
 from services.aerodatabox_service import search_flight
+from services.account_service import AccountService
 from auth import get_current_user, init_firebase
 
 
@@ -1264,5 +1265,94 @@ async def flight_search(
     if not result:
         raise HTTPException(status_code=404, detail=f"Flight {flight_number} not found for {date}")
     return result
+
+
+# ============================================
+# Account Lifecycle Endpoints
+# ============================================
+
+@app.post("/account/delete-request", tags=["Account"])
+async def request_account_deletion(
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Request account deletion with a 3-day grace period.
+
+    The account remains functional during the grace period.
+    Call POST /account/cancel-deletion to cancel before the deadline.
+
+    **Authentication Required**.
+    """
+    try:
+        result = AccountService.request_deletion(user_id)
+        return result
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/account/cancel-deletion", tags=["Account"])
+async def cancel_account_deletion(
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Cancel a pending account deletion request.
+
+    Only works during the 3-day grace period.
+
+    **Authentication Required**.
+    """
+    try:
+        result = AccountService.cancel_deletion(user_id)
+        return result
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/account/deletion-status", tags=["Account"])
+async def get_deletion_status(
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Check if a deletion request is pending.
+
+    Returns pending status and scheduled deletion date if applicable.
+
+    **Authentication Required**.
+    """
+    try:
+        result = AccountService.get_deletion_status(user_id)
+        return result
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/internal/process-deletions", tags=["Internal"])
+async def process_pending_deletions(
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Process all accounts past their deletion grace period.
+
+    This endpoint is called by Cloud Scheduler on a daily cron.
+    In production, it is protected by OIDC service account auth.
+    In dev mode, it allows unauthenticated access for testing.
+
+    **Not a user-facing endpoint.**
+    """
+    is_dev = os.getenv("DEV_MODE", "false").lower() == "true"
+
+    if not is_dev:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        result = AccountService.process_pending_deletions()
+        return result
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 

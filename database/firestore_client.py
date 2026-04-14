@@ -20,6 +20,22 @@ def get_firestore_client() -> firestore.Client:
     return _db
 
 
+def get_users_collection():
+    """
+    Get the top-level users collection.
+    Structure: users/{user_id}
+    """
+    return get_firestore_client().collection(USERS_COLLECTION)
+
+
+def get_user_ref(user_id: str):
+    """
+    Get a reference to a specific user document.
+    Structure: users/{user_id}
+    """
+    return get_firestore_client().collection(USERS_COLLECTION).document(user_id)
+
+
 def get_user_trips_collection(user_id: str):
     """
     Get the trips subcollection for a specific user.

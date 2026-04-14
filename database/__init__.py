@@ -3,6 +3,8 @@ Database package for Travel Tracker API.
 """
 from .firestore_client import (
     get_firestore_client,
+    get_users_collection,
+    get_user_ref,
     get_user_trips_collection,
     get_trip_ref,
     get_user_passengers_collection,
@@ -11,6 +13,8 @@ from .firestore_client import (
 
 __all__ = [
     "get_firestore_client",
+    "get_users_collection",
+    "get_user_ref",
     "get_user_trips_collection",
     "get_trip_ref",
     "get_user_passengers_collection",

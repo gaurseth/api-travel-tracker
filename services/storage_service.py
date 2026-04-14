@@ -171,3 +171,21 @@ def delete_boarding_pass_images(user_id: str, boarding_pass_ids: list) -> None:
         blob = bucket.blob(f"boarding-passes/{user_id}/{bp_id}.jpg")
         if blob.exists():
             blob.delete()
+
+
+def delete_all_user_images(user_id: str) -> int:
+    """
+    Delete ALL boarding pass images for a user.
+    Lists all blobs under boarding-passes/{user_id}/ and deletes them.
+
+    Returns the number of blobs deleted.
+    """
+    bucket = _get_bucket()
+    prefix = f"boarding-passes/{user_id}/"
+    blobs = list(bucket.list_blobs(prefix=prefix))
+    count = 0
+    for blob in blobs:
+        blob.delete()
+        count += 1
+    print(f"[Storage] Deleted {count} images for user {user_id}")
+    return count
