@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Optional
 
 import cv2
+import google.auth
 import numpy as np
 from PIL import Image
 from google.cloud import storage
@@ -153,10 +154,19 @@ def get_signed_url(blob_path: str) -> Optional[str]:
     if not blob.exists():
         return None
 
+    # On Compute Engine / Cloud Run the default credentials don't carry a
+    # private key, so we pass service_account_email to make the library use
+    # the IAM signBlob API instead.
+    credentials, _ = google.auth.default()
+    signing_kwargs = {}
+    if hasattr(credentials, "service_account_email"):
+        signing_kwargs["service_account_email"] = credentials.service_account_email
+
     url = blob.generate_signed_url(
         version="v4",
         expiration=_SIGNED_URL_EXPIRY,
         method="GET",
+        **signing_kwargs,
     )
     return url
 
