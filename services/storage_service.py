@@ -11,6 +11,7 @@ from typing import Optional
 
 import cv2
 import google.auth
+import google.auth.transport.requests
 import numpy as np
 from PIL import Image
 from google.cloud import storage
@@ -155,12 +156,14 @@ def get_signed_url(blob_path: str) -> Optional[str]:
         return None
 
     # On Compute Engine / Cloud Run the default credentials don't carry a
-    # private key, so we pass service_account_email to make the library use
-    # the IAM signBlob API instead.
+    # private key, so we pass service_account_email + access_token to make
+    # the library use the IAM signBlob API instead of local signing.
     credentials, _ = google.auth.default()
     signing_kwargs = {}
     if hasattr(credentials, "service_account_email"):
+        credentials.refresh(google.auth.transport.requests.Request())
         signing_kwargs["service_account_email"] = credentials.service_account_email
+        signing_kwargs["access_token"] = credentials.token
 
     url = blob.generate_signed_url(
         version="v4",
