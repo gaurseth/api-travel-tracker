@@ -401,7 +401,6 @@ def ingest_segments(
                 segments=new_segments,
                 passenger_id=passenger_id,
                 passenger_name=passenger_name,
-                boarding_pass_id=boarding_pass_id,
                 raw_text=raw_text,
                 extraction_metadata=extraction_metadata,
             )
@@ -417,7 +416,6 @@ def ingest_segments(
                     segments=new_segments,
                     passenger_id=passenger_id,
                     passenger_name=passenger_name,
-                    boarding_pass_id=boarding_pass_id,
                     raw_text=raw_text,
                     extraction_metadata=extraction_metadata,
                 )
@@ -427,10 +425,10 @@ def ingest_segments(
                 # Create new trip
                 result = TripService.create_trip_from_segments(
                     user_id=user_id,
+                    tenant_id="personal",
                     segments=new_segments,
                     passenger_id=passenger_id,
                     passenger_name=passenger_name,
-                    boarding_pass_id=boarding_pass_id,
                     raw_text=raw_text,
                     extraction_metadata=extraction_metadata,
                 )
