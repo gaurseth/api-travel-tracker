@@ -29,7 +29,8 @@ _SEGMENT_KEYS = (
     "origin", "destination", "airline_code", "flight_number",
     "departure_date", "departure_time", "arrival_date", "arrival_time",
     "seat", "gate", "boarding_time", "pnr", "cabin_class", "passenger_name",
-    "passenger_id",
+    "passenger_id", "ticket_number", "aircraft",
+    "departure_terminal", "arrival_terminal", "source", "conflict_log",
 )
 
 
@@ -1092,7 +1093,8 @@ class TripService:
             "journey_type", "origin", "destination",
             "departure_date", "departure_time", "arrival_date", "arrival_time",
             "airline_code", "flight_number", "seat", "gate", "boarding_time", "notes",
-            "passenger_id",
+            "passenger_id", "ticket_number", "aircraft",
+            "departure_terminal", "arrival_terminal",
         }
         for key, value in updates.items():
             if key in allowed:

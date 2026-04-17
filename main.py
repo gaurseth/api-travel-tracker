@@ -31,6 +31,8 @@ from services.passenger_service import PassengerService  # upsert-by-ID only
 from services.storage_service import upload_boarding_pass_image, get_signed_url, delete_boarding_pass_images, compress_image
 from services.aerodatabox_service import search_flight
 from services.account_service import AccountService
+from services.dedup_service import ingest_segments
+from services.email_normalizer import normalize_email_booking
 from auth import get_current_user, init_firebase
 
 
@@ -559,57 +561,38 @@ async def process_boarding_pass(
         # passenger_id is client-controlled — not resolved server-side
         passenger_id = None
 
-        # 4. MATCH — find existing trip
-        match_result = TripService.find_matching_trip(user_id, merged_segments)
+        # Tag all segments with source
+        for seg in merged_segments:
+            seg["source"] = "boarding_pass"
+            if not seg.get("conflict_log"):
+                seg["conflict_log"] = []
 
-        # 5. SAVE — attach or create
-        if match_result:
-            success = TripService.attach_segments_to_trip(
-                user_id=user_id,
-                trip_id=match_result["trip_id"],
-                segments=merged_segments,
-                journey_type=journey_type,
-                passenger_id=passenger_id,
-                passenger_name=passenger_name,
-                extraction_metadata=extraction_metadata,
-                raw_text=bcbp_string or raw_text,
-            )
-            if not success:
-                # Trip disappeared between match and attach — create new
-                match_result = None
+        # 4. DEDUP + MATCH + SAVE via unified ingest pipeline
+        dedup_result = ingest_segments(
+            user_id=user_id,
+            segments=merged_segments,
+            source="boarding_pass",
+            passenger_id=passenger_id,
+            passenger_name=passenger_name,
+            raw_text=bcbp_string or raw_text,
+            extraction_metadata=extraction_metadata,
+        )
 
-        if match_result:
-            return {
-                "trip_id": match_result["trip_id"],
-                "is_new_trip": False,
-                "match_score": match_result["score"],
-                "segments": merged_segments,
-                "passenger_name": passenger_name,
-                "passenger_id": passenger_id,
-                "pnr": pnr,
-                "extraction_metadata": extraction_metadata,
-            }
-        else:
-            trip_result = TripService.create_trip_from_segments(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                segments=merged_segments,
-                journey_type=journey_type,
-                passenger_name=passenger_name,
-                passenger_id=passenger_id,
-                extraction_metadata=extraction_metadata,
-                raw_text=bcbp_string or raw_text,
-            )
-            return {
-                "trip_id": trip_result["trip_id"],
-                "is_new_trip": True,
-                "match_score": None,
-                "segments": merged_segments,
-                "passenger_name": passenger_name,
-                "passenger_id": passenger_id,
-                "pnr": pnr,
-                "extraction_metadata": extraction_metadata,
-            }
+        return {
+            "trip_id": dedup_result.get("trip_id"),
+            "is_new_trip": dedup_result.get("action") == "created",
+            "action": dedup_result.get("action"),
+            "segments_merged": dedup_result.get("segments_merged"),
+            "segments_added": dedup_result.get("segments_added"),
+            "segments_rejected": dedup_result.get("segments_rejected"),
+            "conflicts": dedup_result.get("conflicts"),
+            "segments": merged_segments,
+            "passenger_name": passenger_name,
+            "passenger_id": passenger_id,
+            "pnr": pnr,
+            "extraction_metadata": extraction_metadata,
+            "details": dedup_result.get("details"),
+        }
 
     except HTTPException:
         raise
@@ -1265,6 +1248,72 @@ async def flight_search(
     if not result:
         raise HTTPException(status_code=404, detail=f"Flight {flight_number} not found for {date}")
     return result
+
+
+# ============================================
+# Email Booking Ingestion (Protected)
+# ============================================
+
+@app.post("/ingest/email-booking", tags=["Ingestion"])
+async def ingest_email_booking(
+    booking: dict,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Ingest a parsed email booking confirmation.
+
+    Accepts the email-parser Booking JSON format, normalizes it to internal
+    segment format, and runs through the dedup pipeline:
+    - Exact duplicate (same flight, same source) -> rejected
+    - Cross-source match (same flight, different source) -> merged with conflict log
+    - New flight -> attached to matching trip or creates new trip
+
+    **Authentication Required**.
+    """
+    try:
+        # Normalize email format to internal segments
+        segments = normalize_email_booking(booking)
+        if not segments:
+            raise HTTPException(
+                status_code=400,
+                detail="No flight segments found in the booking data",
+            )
+
+        # Extract passenger info for trip-level metadata
+        passengers = booking.get("passengers") or []
+        passenger_name = None
+        if passengers:
+            last = (passengers[0].get("lastName") or "").strip()
+            first = (passengers[0].get("firstName") or "").strip()
+            if last and first:
+                passenger_name = f"{last}/{first}"
+
+        logger.info("Email ingest: %d segment(s), passenger=%s, pnr=%s",
+                     len(segments), passenger_name, booking.get("pnr"))
+
+        # Run through dedup pipeline
+        result = ingest_segments(
+            user_id=user_id,
+            segments=segments,
+            source="email",
+            passenger_name=passenger_name,
+            extraction_metadata={
+                "source": "email",
+                "parser_used": booking.get("parserUsed"),
+                "confidence": booking.get("confidence"),
+                "parsed_at": booking.get("parsedAt"),
+                "message_id": booking.get("messageId"),
+            },
+        )
+
+        logger.info("Email ingest result: %s", result.get("details"))
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================

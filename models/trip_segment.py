@@ -4,7 +4,7 @@ Trip Segment Model
 Represents a single flight leg/segment within a trip.
 A trip can contain multiple segments (e.g., outbound connections, return journey).
 """
-from typing import Optional, Literal
+from typing import Optional, Literal, List, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -47,6 +47,12 @@ class TripSegment(BaseModel):
     # Booking
     pnr: Optional[str] = Field(None, description="PNR / booking reference code")
     cabin_class: Optional[str] = Field(None, description="Cabin class code (e.g., 'Y', 'J', 'F')")
+    ticket_number: Optional[str] = Field(None, description="E-ticket number (e.g., '0712158238861')")
+    aircraft: Optional[str] = Field(None, description="Aircraft type (e.g., 'BOEING 787-9 JET')")
+
+    # Terminal information (from email confirmations)
+    departure_terminal: Optional[str] = Field(None, description="Departure terminal (e.g., 'TERMINAL 2')")
+    arrival_terminal: Optional[str] = Field(None, description="Arrival terminal (e.g., 'TERMINAL 3')")
 
     # Boarding information
     seat: Optional[str] = Field(None, description="Seat assignment (e.g., '12A')")
@@ -76,6 +82,16 @@ class TripSegment(BaseModel):
     # Timezone info (from Aviationstack API enrichment)
     departure_timezone: Optional[str] = Field(None, description="IANA timezone, e.g. 'America/New_York'")
     arrival_timezone: Optional[str] = Field(None, description="IANA timezone, e.g. 'Europe/London'")
+
+    # Provenance
+    source: Optional[str] = Field(
+        None,
+        description="Data source: 'boarding_pass', 'manual', or 'email'"
+    )
+    conflict_log: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Log of field conflicts during multi-source merge"
+    )
 
     # Metadata
     manually_entered: bool = Field(
