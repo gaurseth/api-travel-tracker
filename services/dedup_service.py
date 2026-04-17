@@ -6,7 +6,7 @@ from multiple sources (boarding_pass, manual, email). See DEDUP_MERGE_SPEC.md
 for the full specification.
 """
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
 from database import get_user_trips_collection
@@ -276,6 +276,101 @@ def merge_segment_fields(
 
 
 # ---------------------------------------------------------------------------
+# Trip splitting by time gap
+# ---------------------------------------------------------------------------
+
+_DEFAULT_FLIGHT_HOURS = 12  # fallback when arrival time is unknown
+_MAX_GAP_HOURS = 36
+
+
+def _parse_datetime(date_str: Optional[str], time_str: Optional[str]) -> Optional[datetime]:
+    """Parse date + time into a datetime. Returns None if date is missing."""
+    if not date_str:
+        return None
+    try:
+        if time_str:
+            return datetime.fromisoformat(f"{date_str}T{time_str}")
+        return datetime.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return None
+
+
+def _segment_sort_key(seg: Dict[str, Any]) -> str:
+    """Sort key: departure_date + departure_time, missing values sort last."""
+    d = seg.get("departure_date") or "9999-99-99"
+    t = seg.get("departure_time") or "99:99"
+    return f"{d}T{t}"
+
+
+def split_segments_by_gap(
+    segments: List[Dict[str, Any]],
+    max_gap_hours: float = _MAX_GAP_HOURS,
+) -> List[List[Dict[str, Any]]]:
+    """
+    Split a list of segments into groups where consecutive segments are
+    within max_gap_hours of each other.
+
+    Gap is measured from arrival (date+time) of segment N to departure
+    (date+time) of segment N+1.
+
+    Fallbacks:
+      - Missing arrival_date/time on seg N: use departure + DEFAULT_FLIGHT_HOURS
+      - Missing departure_time on seg N+1: assume 00:00 (start of day)
+
+    Returns a list of segment groups. Single-segment input returns [[seg]].
+    """
+    if len(segments) <= 1:
+        return [segments] if segments else []
+
+    # Sort by departure date+time
+    sorted_segs = sorted(segments, key=_segment_sort_key)
+
+    groups: List[List[Dict[str, Any]]] = [[sorted_segs[0]]]
+
+    for i in range(1, len(sorted_segs)):
+        prev = sorted_segs[i - 1]
+        curr = sorted_segs[i]
+
+        # Compute arrival of previous segment
+        prev_arrival = _parse_datetime(
+            prev.get("arrival_date"), prev.get("arrival_time")
+        )
+        if not prev_arrival:
+            # Fallback: departure + default flight duration
+            prev_dep = _parse_datetime(
+                prev.get("departure_date"), prev.get("departure_time")
+            )
+            if prev_dep:
+                prev_arrival = prev_dep + timedelta(hours=_DEFAULT_FLIGHT_HOURS)
+
+        # Compute departure of current segment
+        curr_departure = _parse_datetime(
+            curr.get("departure_date"), curr.get("departure_time")
+        )
+        if not curr_departure:
+            # Can't compute gap without departure — keep in same group
+            groups[-1].append(curr)
+            continue
+
+        if not prev_arrival:
+            # Can't compute gap without arrival — keep in same group
+            groups[-1].append(curr)
+            continue
+
+        gap_hours = (curr_departure - prev_arrival).total_seconds() / 3600
+
+        if gap_hours > max_gap_hours:
+            print(f"[Dedup] Split: {gap_hours:.1f}h gap between "
+                  f"{prev.get('origin')}->{prev.get('destination')} and "
+                  f"{curr.get('origin')}->{curr.get('destination')}")
+            groups.append([curr])
+        else:
+            groups[-1].append(curr)
+
+    return groups
+
+
+# ---------------------------------------------------------------------------
 # Ingest orchestrator
 # ---------------------------------------------------------------------------
 
@@ -323,7 +418,7 @@ def ingest_segments(
         if not seg.get("conflict_log"):
             seg["conflict_log"] = []
 
-    # Step 1: boarding pass re-scan check
+    # Step 0: boarding pass re-scan check
     if boarding_pass_id and check_boarding_pass_exists(user_id, boarding_pass_id):
         print(f"[Dedup] Rejected: boarding_pass_id {boarding_pass_id} already exists")
         return {
@@ -334,6 +429,58 @@ def ingest_segments(
             "segments_rejected": len(segments),
             "conflicts": [],
             "details": f"Boarding pass {boarding_pass_id} already processed.",
+        }
+
+    # Step 0b: split into separate trips if gap > 36h between segments
+    groups = split_segments_by_gap(segments)
+    if len(groups) > 1:
+        print(f"[Dedup] Splitting {len(segments)} segments into {len(groups)} trip group(s)")
+        combined_results: List[Dict[str, Any]] = []
+        for i, group in enumerate(groups):
+            print(f"[Dedup] Processing group {i + 1}/{len(groups)}: {len(group)} segment(s)")
+            group_result = ingest_segments(
+                user_id=user_id,
+                segments=group,
+                source=source,
+                passenger_id=passenger_id,
+                passenger_name=passenger_name,
+                boarding_pass_id=boarding_pass_id if i == 0 else None,
+                raw_text=raw_text,
+                extraction_metadata=extraction_metadata,
+            )
+            combined_results.append(group_result)
+
+        # Aggregate results across all groups
+        total_merged = sum(r.get("segments_merged", 0) for r in combined_results)
+        total_added = sum(r.get("segments_added", 0) for r in combined_results)
+        total_rejected = sum(r.get("segments_rejected", 0) for r in combined_results)
+        all_conflicts = []
+        for r in combined_results:
+            all_conflicts.extend(r.get("conflicts", []))
+        trip_ids = [r.get("trip_id") for r in combined_results if r.get("trip_id")]
+
+        actions = {r.get("action") for r in combined_results}
+        if "created" in actions:
+            action = "created"
+        elif "merged" in actions:
+            action = "merged"
+        else:
+            action = "rejected"
+
+        return {
+            "action": action,
+            "trip_id": trip_ids[0] if trip_ids else None,
+            "trip_ids": trip_ids,
+            "trips_created": len(groups),
+            "segments_merged": total_merged,
+            "segments_added": total_added,
+            "segments_rejected": total_rejected,
+            "conflicts": all_conflicts,
+            "details": (
+                f"Split into {len(groups)} trips. "
+                f"{total_merged} merged, {total_added} added, "
+                f"{total_rejected} rejected, {len(all_conflicts)} conflict(s)"
+            ),
         }
 
     # Step 2-3: fingerprint and search for duplicates
