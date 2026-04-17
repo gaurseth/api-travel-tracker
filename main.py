@@ -33,7 +33,7 @@ from services.aerodatabox_service import search_flight
 from services.account_service import AccountService
 from services.dedup_service import ingest_segments
 from services.email_normalizer import normalize_email_booking
-from auth import get_current_user, init_firebase
+from auth import get_current_user, init_firebase, verify_internal_api_key, resolve_user_by_email
 
 
 def is_dev_mode() -> bool:
@@ -1257,20 +1257,36 @@ async def flight_search(
 @app.post("/ingest/email-booking", tags=["Ingestion"])
 async def ingest_email_booking(
     booking: dict,
-    user_id: str = Depends(get_current_user),
+    _authorized: bool = Depends(verify_internal_api_key),
 ):
     """
     Ingest a parsed email booking confirmation.
 
-    Accepts the email-parser Booking JSON format, normalizes it to internal
-    segment format, and runs through the dedup pipeline:
+    **Service-to-service endpoint** — authenticated via internal API key,
+    not a user token. The user is resolved from `userEmail` in the payload
+    (looked up via Firebase Auth).
+
+    Accepts the email-parser Booking JSON format with an added `userEmail`
+    field. Normalizes to internal segment format and runs through the
+    dedup pipeline:
     - Exact duplicate (same flight, same source) -> rejected
     - Cross-source match (same flight, different source) -> merged with conflict log
     - New flight -> attached to matching trip or creates new trip
 
-    **Authentication Required**.
+    Required payload field:
+        `userEmail` — the email address of the user who forwarded the booking
     """
     try:
+        # Resolve user from email
+        user_email = booking.get("userEmail")
+        if not user_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing 'userEmail' field — required to identify the user",
+            )
+        user_id = resolve_user_by_email(user_email)
+        logger.info("Email ingest: resolved %s -> user_id=%s", user_email, user_id)
+
         # Normalize email format to internal segments
         segments = normalize_email_booking(booking)
         if not segments:

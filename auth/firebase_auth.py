@@ -162,6 +162,81 @@ async def get_current_user(
         )
 
 
+def verify_internal_api_key(
+    authorization: Optional[str] = Header(None),
+) -> bool:
+    """
+    Verify that the request carries a valid internal API key.
+
+    The key is set via INTERNAL_API_KEY env var and shared with
+    trusted services (e.g. email parser).
+
+    Returns True if valid, raises HTTPException(401) otherwise.
+    """
+    expected = os.getenv("INTERNAL_API_KEY")
+
+    if _is_dev_mode() and not expected:
+        # Dev mode without a key configured — allow through
+        return True
+
+    if not expected:
+        raise HTTPException(status_code=401, detail="Internal API key not configured")
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization format. Expected: 'Bearer <key>'")
+
+    token = authorization.split("Bearer ", 1)[1].strip()
+    if token != expected:
+        raise HTTPException(status_code=401, detail="Invalid internal API key")
+
+    return True
+
+
+def resolve_user_by_email(email: str) -> str:
+    """
+    Look up a Firebase user's UID by their email address.
+
+    Used by service-to-service endpoints where the calling service
+    knows the user's email but not their Firebase UID.
+
+    Args:
+        email: The user's email address
+
+    Returns:
+        Firebase UID (str)
+
+    Raises:
+        HTTPException(404): If no user found for this email
+        HTTPException(500): If Firebase lookup fails
+    """
+    if _is_dev_mode():
+        # In dev mode, if Firebase isn't working, return a deterministic ID
+        try:
+            user_record = auth.get_user_by_email(email)
+            return user_record.uid
+        except Exception:
+            # Fallback: use email as the user ID in dev mode
+            print(f"⚠️  DEV MODE: Could not resolve email {email}, using email as user_id")
+            return email
+
+    try:
+        user_record = auth.get_user_by_email(email)
+        return user_record.uid
+    except auth.UserNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No user account found for email: {email}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to resolve user by email: {str(e)}",
+        )
+
+
 def create_custom_token_for_testing(user_id: str = "test_user_123") -> str:
     """
     Create a Firebase custom token for testing.
